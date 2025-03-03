@@ -1,0 +1,225 @@
+---
+title: "Lipidomics Baseline Analysis"
+subtitle: "Comparion in the Systematical and Structural Composition of the Lipids"
+author: "Sofie Olund Villumsen"
+date: "2/9/2021"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+
+# Initial settings
+
+```{r echo=FALSE}
+# Clear workspace
+rm(list = ls()) 
+```
+
+Load packages
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(lipidomeR) 
+```
+
+Load data
+```{r message=FALSE}
+path <- "L:/LovbeskyttetMapper/HCOF Stem Cells/Sofie/Baseline_study/Lipidomics"
+setwd(path)
+
+lipid_data <- read_csv(paste(path, "data/02_lipidomics_data_log2_zscore.csv", sep="/"))
+combined_data <- read_csv(paste(path, "data/02_combined_data_log2_zscore.csv", sep="/"))
+
+top_lipids <- read_tsv(paste(path, "data/04_lipidomics_top_lipids.tsv", sep="/"))
+```
+
+```{r echo=FALSE}
+# Get a list of metabolites
+lipid_col_names <- colnames(lipid_data)[3:ncol(lipid_data)]
+```
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+
+```{r echo=FALSE}
+# Prepare data
+lipid_data_baseline <- combined_data %>% 
+  filter(Label == "A") %>% 
+  unite("SampleID_bwcat_NAFLD", c(bwcat_NAFLD, Sample_ID), remove = FALSE) %>% 
+  filter(SampleID_bwcat_NAFLD != "NBW_FALSE_050") %>% 
+  select(-everything(), bwcat, bwcat_NAFLD, Sample_ID, Label, all_of(lipid_col_names))
+```
+
+
+# Two groups: NBW and LBW
+
+```{r echo=FALSE}
+lipid_data_baseline_x <- lipid_data_baseline %>% 
+  select(bwcat, everything(), -c("bwcat_NAFLD","Sample_ID","Label"))
+
+lip_names <- colnames(lipid_data_baseline_x[,2:ncol(lipid_data_baseline_x)])
+lipid_mapping <- map_lipid_names( x = lip_names )
+
+lipid_data_baseline_x$bwcat <- factor(lipid_data_baseline_x$bwcat, levels=c("LBW", "NBW"))
+
+# Compute the regression models
+result.limma <-
+  compute_models_with_limma(
+    x = lipid_data_baseline_x,
+    dependent.variables = lipid_mapping$Name,
+    independent.variables = c("bwcat"))
+```
+
+```{r echo=FALSE, warning=FALSE}
+# Save as png file
+png(paste(path, "results/05_01_lipidomeR_NBW_LBW_heatmaps.png", sep="/"),
+    width = 6*300,        # 5 x 300 pixels
+    height = 6*550,
+    res = 200,            # 300 pixels per inch
+    pointsize = 10)      # font size) 
+figure.output <- heatmap_lipidome_from_limma(
+     x = result.limma$"model",
+     names.mapping = lipid_mapping,
+     axis.x.carbons = FALSE,
+     class.facet = "row",
+     plot.all = TRUE,
+     plot.individual = FALSE,
+     print.figure = TRUE,
+     scales = "free",
+     space = "free"
+ )
+dev.off()
+```
+
+##### **Comments:** The plot shows that there is no significant difference between the abundance of lipids between the birthweight groups (NBW, LBW). There is a tendency of difference between the two groups in the abundance of (however not significantly):
+- Phosphatidylcholines (PC)
+- Phosphatidylethanolamine (PE)
+- Sphingomyelin (SM) 
+- Triglycerides (TG)
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+# Three groups: NBW, LBW÷NAFLD and LBW+NAFLD
+
+```{r echo=FALSE}
+lipid_data_baseline_y <- lipid_data_baseline %>% 
+  mutate(Group = case_when(bwcat_NAFLD == "NBW_FALSE" ~ "NBW", 
+                           bwcat_NAFLD == "LBW_FALSE" ~ "LBW÷NAFLD",
+                           bwcat_NAFLD == "LBW_TRUE" ~ "LBW+NAFLD")) %>% 
+  select(Group, everything(), -c("bwcat","bwcat_NAFLD","Sample_ID","Label"))
+
+lip_names <- colnames(lipid_data_baseline_y[,2:ncol(lipid_data_baseline_y)])
+lipid_mapping <- map_lipid_names( x = lip_names )
+
+# Create factors for the order
+lipid_data_baseline_y$Group <- factor(lipid_data_baseline_y$Group, 
+                                                   levels=c("NBW","LBW÷NAFLD","LBW+NAFLD"))
+
+# Compute the regression models
+result.limma <-
+  compute_models_with_limma(
+    x = lipid_data_baseline_y,
+    dependent.variables = lipid_mapping$Name,
+    independent.variables = c("Group"))
+
+```
+
+
+```{r echo=FALSE, warning=FALSE}
+# Save as png file
+png(paste(path, "results/05_02_lipidomeR_NBW_LBWnoNAFLD_LBWNAFLD_heatmaps.png", sep="/"),
+    width = 6*300,        # 5 x 300 pixels
+    height = 6*550,
+    res = 200,            # 300 pixels per inch
+    pointsize = 10)      # font size) 
+figure.output <- heatmap_lipidome_from_limma(
+     x = result.limma$"model",
+     names.mapping = lipid_mapping,
+     axis.x.carbons = FALSE,
+     class.facet = "row",
+     plot.all = TRUE,
+     plot.individual = FALSE,
+     print.figure = TRUE,
+     scales = "free",
+     space = "free"
+ )
+dev.off()
+```
+
+##### **Comments:** The plot shows that there is no significant difference between the abundance of lipids between the group LBW÷NAFLD and NBW. However, when comparing LBW÷NAFLD with LBW+NAFLD we significant difference in the abundance between the groups. The plot shows a differential abundance of (FDR < 0.1): 
+- Increased: Ceramide (CER) [with unsaturated long-chain-fatty-acids (LCFA)]
+- Increased: Lysophosphatidylcholines (LPC) [with saturated LCFA]
+- Increased: Phosphatidylcholines (PC) [with saturated/unsaturated LCFA]
+- Increased: Phosphatidylethanolamine (PE) [with unsaturated LCFA]
+- Increased: Sphingomyelin (SM) [with unsaturated very-LCFA]
+- Increased: Triglycerides (TG) [with saturated/unsaturated LCFA/VLCFA]
+- Decreased: Cholesteaol Esters (CE) [with unsaturated LCFA]
+- Decreased: Phosphatidylglycerol (PG) [with unsaturated LCFA]
+- Decreased: Triglycerides (TG) [with unsaturated VLCFA]
+
+Furthermore, we observe that when the LBW+NAFLD is removed, the difference bewteen NBW and LBW÷NAFLD is decreasing. 
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+# Top lipids 
+Three groups: NBW, LBW÷NAFLD and LBW+NAFLD
+
+```{r echo=FALSE}
+top_lipids_list <- unique(top_lipids$Lipids)
+
+lipid_data_baseline_z <- lipid_data_baseline %>% 
+  mutate(Group = case_when(bwcat_NAFLD == "NBW_FALSE" ~ "NBW", 
+                           bwcat_NAFLD == "LBW_FALSE" ~ " LBW w/o NAFLD",
+                           bwcat_NAFLD == "LBW_TRUE" ~ " LBW w/ NAFLD")) %>% 
+  select(Group, all_of(top_lipids_list))
+
+lip_names <- colnames(lipid_data_baseline_z[,2:ncol(lipid_data_baseline_z)])
+lipid_mapping <- map_lipid_names( x = lip_names )
+
+# Create factors for the order
+lipid_data_baseline_z$Group <- factor(lipid_data_baseline_z$Group, 
+                                                   levels=c("NBW"," LBW w/o NAFLD"," LBW w/ NAFLD"))
+
+# Compute the regression models
+result.limma <-
+  compute_models_with_limma(
+    x = lipid_data_baseline_z,
+    dependent.variables = lipid_mapping$Name,
+    independent.variables = c("Group"))
+
+```
+
+
+```{r echo=FALSE, warning=FALSE}
+# Save as png file
+png(paste(path, "results/05_03_lipidomeR_toplipids_NBW_LBWnoNAFLD_LBWNAFLD_heatmaps.png", sep="/"),
+    width = 6*300,        # 5 x 300 pixels
+    height = 6*250,
+    res = 200,            # 300 pixels per inch
+    pointsize = 10)      # font size) 
+figure.output <- heatmap_lipidome_from_limma(
+     x = result.limma$"model",
+     names.mapping = lipid_mapping,
+     axis.x.carbons = FALSE,
+     class.facet = "row",
+     plot.all = TRUE,
+     plot.individual = FALSE,
+     print.figure = TRUE,
+     scales = "free",
+     space = "free"
+ )
+dev.off()
+```
+

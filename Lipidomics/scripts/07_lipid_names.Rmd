@@ -1,0 +1,69 @@
+---
+title: "Lipidomics Overfeeding Analysis"
+subtitle: "Lipid groups"
+author: "Sofie Olund Villumsen"
+date: "16/12/2021"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+
+# Initial settings
+```{r echo=FALSE}
+# Clear workspace
+rm(list = ls())
+```
+
+Load packages
+```{r message=FALSE}
+library(tidyverse)
+```
+
+Load data
+```{r message=FALSE}
+path <- "L:/LovbeskyttetMapper/HCOF Stem Cells/Sofie/Baseline_study/Lipidomics/"
+setwd(path)
+
+lipid_data <- read_csv(paste(path, "data/02_lipidomics_data_imputed_log2_zscore.csv", sep="/")) 
+
+```
+
+
+
+```{r}
+lipid_names <- as.data.frame(colnames(lipid_data[3:ncol(lipid_data)])) %>% 
+  rename(lipid_name = "colnames(lipid_data[3:ncol(lipid_data)])")
+
+lipid_class <- lipid_names %>% 
+  mutate(class = case_when(str_detect(lipid_name, "CE") ~ "Cholesterol ester",
+                            str_detect(lipid_name, "Cer") ~ "Ceramide",
+                            str_detect(lipid_name, "DG") ~ "Diglyceride",
+                            str_detect(lipid_name, "FA") ~ "Fatty acid",
+                            str_detect(lipid_name, "DG") ~ "Diglyceride",
+                            str_detect(lipid_name, "LPC") ~ "Lysophosphatidylcholines",
+                            str_detect(lipid_name, "LPE") ~ "Lysophosphatidylethanolamine",
+                            str_detect(lipid_name, "PA") ~ "Phosphatidic acid",
+                            str_detect(lipid_name, "PC") ~ "Phosphatidylcholines",
+                            str_detect(lipid_name, "PE") ~ "Phosphatidylethanolamine",
+                            str_detect(lipid_name, "PG") ~ "Phosphatidylglycerol",
+                            str_detect(lipid_name, "SM") ~ "Sphingolipids",
+                            str_detect(lipid_name, "TG") ~ "Triglyceride "))
+
+lipid_class_count <- lipid_class %>% 
+  group_by(class) %>% 
+  count() %>% 
+  arrange(by = n) %>% 
+  write_tsv(paste(path, "data/07_lipid_class_count.tsv", sep="/")) 
+```
+
+
+
+
+
+
+
+
+
+
+

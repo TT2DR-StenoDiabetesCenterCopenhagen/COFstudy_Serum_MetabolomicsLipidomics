@@ -1,0 +1,434 @@
+---
+title: "Lipidomics Baseline Analysis"
+subtitle: "Data preprocessing"
+author: "Sofie Olund Villumsen"
+date: "31/8/2021"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+R markdown doc analyzing and exploring lipidomics data in combination with clinical from the type 2 diabetes overfeeding study of 48 men with mean age of 38 years.
+
+# Initial settings
+
+- Inspect data format 
+- Check for columns with zero or near zero variance
+- Check for missing values
+- Check for outliers
+- Impute missing values and outliers with K-nearest neighbor
+- Check normality (density plots and Kolmogorov-Smirnov test)
+- Transform and scale data (log2 and zscore/autoscale)
+
+
+```{r echo=FALSE}
+# Clear workspace
+rm(list = ls()) 
+```
+
+Load packages
+```{r message=FALSE}
+library(tidyverse)
+library(caret) # Function nearzerovar
+library(impute) # Imputing data with KNN
+library(DataExplorer) # http://boxuancui.github.io/DataExplorer/
+```
+
+Load data
+```{r message=FALSE}
+path <- "L:/LovbeskyttetMapper/HCOF Stem Cells/Sofie/Baseline_study/Lipidomics"
+setwd(path)
+
+lipid_data <- read_csv(paste(path, "data/01_lipidomics_data.csv", sep="/")) 
+clinical_data <- read_csv(paste(path, "data/01_clinical_data.csv", sep="/"))
+```
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+
+# Tidy and combine lipidomics and clinical data
+
+```{r echo=FALSE}
+# Lipidomics data cleanup
+lipid_data_tidy <- lipid_data %>% 
+  separate(Sample_ID, into = c("Sample_ID", "Label"), sep = "(?<=[0-9])(?=[a-z])") %>% 
+  mutate(Label = str_to_upper(Label), 
+         Sample_ID = case_when(nchar(Sample_ID) == 2 ~ as.character(paste0("0", Sample_ID)))) %>% 
+  select(everything(), -...282)
+```
+
+
+```{r}
+# Change lipid names to accomodate the correct nomenclature XX(XX:XX)
+lipid_names <- c()
+
+for (lipid in colnames(lipid_data_tidy)) {
+  if (str_detect(lipid,"Cer")) {
+    cer <- gsub('^(\\S+)\\([d](\\d[0-9]*):(\\d[0-9]*)', '\\1-d(\\2:\\3)', lipid)
+    lipid_names <- c(lipid_names, cer)
+    
+  } else if (str_detect(lipid,"SM")) {
+    sm <- gsub('^(\\S+)\\([d](\\d[0-9]*):(\\d[0-9]*)\\)', '\\1-d(\\2:\\3)', lipid)
+    lipid_names <- c(lipid_names, sm)
+    
+  } else if (str_detect(lipid,"TG|PG|PA|FA|MePE|CE|DG")) {
+    lipid_names <- c(lipid_names, lipid)
+    
+  } else if (str_detect(lipid,"LPC\\(0:0/O-18:1\\)")) {
+    lpc_special <- "LPC-O(18:1)"    
+    lipid_names <- c(lipid_names, lpc_special)
+    
+  } else if (str_detect(lipid,"^LPC\\(0")) {
+    lpc_1 <- gsub('LPC\\S+/(\\d[0-9]*):(\\d[0-9]*)\\)', 'LPC(\\1:\\2)', lipid)    
+    lipid_names <- c(lipid_names, lpc_1)
+    
+  } else if (str_detect(lipid,"^LPC\\(\\d+")) {
+    lpc_2 <- gsub('LPC\\((\\d[0-9]*):(\\d[0-9]*)', 'LPC(\\1:\\2)', lipid)    
+    lipid_names <- c(lipid_names, lpc_2)
+    
+  } else if (str_detect(lipid,"^LPC\\(O")) {
+    lpc_o <- gsub('^(\\S+)\\(O-(\\d[0-9]*):(\\d[0-9]*)', '\\1-O(\\2:\\3)', lipid)
+    lipid_names <- c(lipid_names, lpc_o)
+    
+  } else if (str_detect(lipid,"^LPC\\(P")) {
+    lpc_p <- gsub('^(\\S+)\\(P-(\\d[0-9]*):(\\d[0-9]*)\\)', '\\1-P(\\2:\\3)', lipid)
+    lipid_names <- c(lipid_names, lpc_p)
+    
+  } else if (str_detect(lipid,"^PC\\(O")) {
+    pc_o <- gsub('^(\\S+)\\(O-(\\d[0-9]*):(\\d[0-9]*)\\)', '\\1-O(\\2:\\3)', lipid)
+    lipid_names <- c(lipid_names, pc_o)
+    
+  } else if (str_detect(lipid,"^PC\\(P")) {
+    pc_p <- gsub('^(\\S+)\\(P-(\\d[0-9]*):(\\d[0-9]*)\\)', '\\1-P(\\2:\\3)', lipid)
+    lipid_names <- c(lipid_names, pc_p)
+    
+  } else if (str_detect(lipid,"^PC\\(")) {
+    pc <- gsub('^(\\S+)\\((\\d[0-9]{2})(\\d[0-9]*)\\)', '\\1-d(\\2\\3', lipid)
+    lipid_names <- c(lipid_names, pc)
+    
+  } else if (str_detect(lipid,"^LPE\\(P")) {
+    lpe_p <- gsub('^(\\S+)\\(P-(\\d[0-9]*):(\\d[0-9]*)\\)', '\\1-P(\\2:\\3)', lipid)
+    lipid_names <- c(lipid_names, lpe_p)
+    
+  } else if (str_detect(lipid,"LPE\\(0:0/20:1\\)")) {
+    lpe_special <- "LPE(21:1)"    
+    lipid_names <- c(lipid_names, lpe_special)
+    
+  } else if (str_detect(lipid,"^LPE\\(")) {
+    lpe <- gsub('^(\\S+)\\((\\d[0-9]*):(\\d[0-9]*)[/|\\)]\\S?', '\\1(\\2:\\3)', lipid)
+    lipid_names <- c(lipid_names, lpe)
+    
+  } else if (str_detect(lipid,"^PE\\(O")) {
+    pe_o <- gsub('^(\\S+)\\(O-(\\d[0-9]*):(\\d[0-9]*)\\)', '\\1-O(\\2:\\3)', lipid)
+    lipid_names <- c(lipid_names, pe_o)
+    
+  } else if (str_detect(lipid,"^PE\\(P")) {
+    pe_p <- gsub('^(\\S+)\\(P-(\\d[0-9]*):(\\d[0-9]*)\\)', '\\1-P(\\2:\\3)', lipid)
+    lipid_names <- c(lipid_names, pe_p)
+    
+  } else if (str_detect(lipid,"^PE\\(")) {
+    pe <- gsub('^(\\S+)\\((\\d[0-9]{2})(\\d[0-9]*)\\)', '\\1-d(\\2\\3', lipid)
+    lipid_names <- c(lipid_names, pe)
+
+  } else if (str_detect(lipid,"Sample_ID|Label")) {
+    next
+  } 
+}
+
+lipid_data_clean <- lipid_data_tidy
+colnames(lipid_data_clean) <- c("Sample_ID","Label",lipid_names)
+```
+
+
+
+
+```{r echo=FALSE}
+# Clinical data cleanup
+clinical_data_clean <- clinical_data %>% 
+  unite("bwcat_NAFLD", c(bwcat,NAFLD), remove = FALSE) %>% 
+  filter(visit != "M") 
+```
+
+Combine cleaned data frames
+```{r echo=FALSE}
+combined_data <- left_join(lipid_data_clean, clinical_data_clean,  by = c("Label" = "visit", "Sample_ID" = "id")) %>% 
+  select(Sample_ID, bwcat, randomization, Label, NAFLD, everything()) #%>% 
+combined_data
+```
+
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+
+
+# Explore data
+
+## Variance check (remove cols with zero or near zero values)
+```{r echo=FALSE}
+nearZeroVar(lipid_data_clean[, 3:ncol(lipid_data_clean)], saveMetrics = TRUE) %>% 
+  filter(nzv == TRUE)
+```
+**Comments:** No variance data, thus no need for removing any variables.
+
+
+## Missing values in combined data
+```{r echo=FALSE}
+missing_lip <- profile_missing(lipid_data_clean) %>% arrange(desc(pct_missing))
+missing_lip
+```
+**Comments:** 11 missing value in the data set (Cer(d43:1), PA(44:1), PA(44:2), PG(34:1), TG(58:12), TG(42:2), TG(40:1))
+
+
+## Identify negative values in metaboloics data
+```{r echo=FALSE}
+minvals <- as.data.frame(apply(lipid_data_clean,2,min))
+```
+**Comments:** From the list of min vals, we see that the minimum values for each metabolite differs a lot and no lipids have negative concentration, however some have missing values ((PG(34:1),Cer(d43:1),TG(58:12),TG(42:2),TG(40:1),PA(44:1) and PA(44:2)). Missing values  will be imputed. 
+
+
+## Outlier overview via boxplot
+```{r echo=FALSE}
+# Pivot data frame 
+pivot_lipid_data <- lipid_data_clean %>% 
+  pivot_longer(cols = -c(Sample_ID, Label), 
+               names_to = "Lipid", 
+               values_to = "Concentrations")
+
+# Boxplot of raw metabolite concentrations
+lipid_plot <- pivot_lipid_data %>% 
+  ggplot(mapping = aes(x = Concentrations, y = Lipid)) + 
+  geom_boxplot(alpha = 0.5) + 
+  geom_point(position = position_jitter(seed = 0.4, width = 0.02), size = 0.8) +
+  coord_flip() + 
+  labs(x = 'Raw lipid concentrations', title = "Distribution of lipid concentrations") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=0.5))
+lipid_plot
+```
+**Comments:** from this plot it is clear that the lipids follow different ranges and that outliers do occur.
+
+
+## Outliers to NAN
+```{r}
+lip_names <- lipid_data_clean %>% 
+  select(everything(), -c(Sample_ID, Label))
+
+lip_df <- lipid_data_clean %>% 
+  unite("Label_SampleID", c(Label,Sample_ID), remove = TRUE) 
+
+df_rm_outlier <- data.frame(lip_df$Label_SampleID)
+
+# Loop for identifying outliers and replacing them with NA values
+for (lip in colnames(lip_names)) {
+  # Identify outliers
+  x_new <- filter(lip_df, lip_df[[lip]] %in% boxplot(lip_df[[lip]], plot = FALSE)$out)
+  
+  # Replace the outlier values with NA
+  lipid <- replace(lip_df[[lip]], lip_df[[lip]] %in% x_new[[lip]], values = NA)
+  
+  # Combine in data frame
+  df_rm_outlier <- cbind(df_rm_outlier, data.frame(lipid))
+}
+
+colnames(df_rm_outlier) <- colnames(lip_df)
+```
+
+
+```{r}
+table(is.na(df_rm_outlier))
+sapply(df_rm_outlier, function(x) sum(is.na(x)))
+```
+
+
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+
+## Impute data with k-nearest neighbor
+```{r}
+# Convert data frame from numeric to factor
+indx <- sapply(df_rm_outlier, is.numeric)
+df_rm_outlier[indx] <- lapply(df_rm_outlier[indx], function(df_rm_outlier) as.factor(as.character(df_rm_outlier)))
+df_rm_outlier <- df_rm_outlier[2:280]
+
+# Set random seed 
+if(exists(".Random.seed")) rm(.Random.seed)
+
+# Impute with KNN function
+df_rm_outlier_imputed <- impute.knn(as.matrix(df_rm_outlier))
+
+lip_df_imputed <- as_tibble(df_rm_outlier_imputed$data) %>% 
+  mutate(Sample_ID = lipid_data_clean$Sample_ID,
+         Label = lipid_data_clean$Label) %>% 
+  select(Sample_ID, Label, everything())
+
+```
+
+
+
+
+## Impute
+```{r echo=FALSE}
+# List of lipids containing missing values
+#miss_lip <- as.character(subset(missing_lip$feature, missing_lip$num_missing > 0))
+
+#df_mean_total <- data.frame()
+
+# Loop calculating mean value of lipids with missing values, creating a new df with mean values
+#for (lipid in miss_lip) {
+ # cal_mean <- lipid_data_clean[[lipid]] %>% 
+  #  mean(na.rm = TRUE)
+  #df_mean <- data.frame(lipid, cal_mean)
+  #df_mean_total <- rbind(df_mean_total, df_mean)
+#}
+
+#df_mean_total
+
+# Impute with values obtained
+#lipid_data_clean_impt <- lipid_data_clean %>% 
+ # mutate(`Cer-d(43:1))` = case_when(is.na(`Cer-d(43:1))`) ~ df_mean_total$cal_mean[1], TRUE ~ `Cer-d(43:1))`),
+  #       `PA(44:1)` = case_when(is.na(`PA(44:1)`) ~ df_mean_total$cal_mean[2], TRUE ~ `PA(44:1)`),
+   #      `PA(44:2)` = case_when(is.na(`PA(44:2)`) ~ df_mean_total$cal_mean[3], TRUE ~ `PA(44:2)`),
+    #     `PG(34:1)` = case_when(is.na(`PG(34:1)`) ~ df_mean_total$cal_mean[4], TRUE ~ `PG(34:1)`),
+     #    `TG(58:12)` = case_when(is.na(`TG(58:12)`) ~ df_mean_total$cal_mean[5], TRUE ~ `TG(58:12)`),
+      #   `TG(42:2)` = case_when(is.na(`TG(42:2)`) ~ df_mean_total$cal_mean[6], TRUE ~ `TG(42:2)`),
+       #  `TG(40:1)` = case_when(is.na(`TG(40:1)`) ~ df_mean_total$cal_mean[7], TRUE ~ `TG(40:1)`))
+```
+
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+
+## Distribution
+Normality check, prepare data frame for a longer format with the purpose of checking the distribution of data 
+```{r echo=FALSE}
+pivot_conc <- lip_df_imputed %>% 
+  pivot_longer(cols = -c(Label, Sample_ID), 
+               names_to = "Lipid", 
+               values_to = "Concentrations")
+
+# Calculate mean of every lipid across samples
+mean_concentration <- pivot_conc %>% 
+  group_by(Lipid) %>% 
+  summarize(Mean = mean(Concentrations))
+
+# Distribution of mean lipid concentration
+mean_concentration %>% 
+  ggplot(aes(x = Mean)) + 
+  geom_density() + 
+  labs(subtitle = "Distribution of lipid concentrations",
+       x = "Lipid concentrations")
+```
+
+**Comments:** a skewed distribution, thus we need to normalize data.
+
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+
+## Distribution
+Normality test, Kolmogorov-Smirnov Test
+```{r echo=FALSE}
+# Kolmogorov-Smirnov Test check if the concentrations are normaly distributed
+pval_ks_test <- ks.test(x = mean_concentration$Mean, 
+        y = "pnorm", 
+        mean = mean(mean_concentration$Mean), 
+        sd = sd(mean_concentration$Mean))$p.value
+pval_ks_test
+# Data is normal distributed if the p-value > 0.05. So the concentration variable is normally distributed.
+```
+
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+
+# Transform/normalize/scale
+Getting a dataframe with log and scaled concentrations
+```{r echo=FALSE}
+# Logtransform data
+lipid_data_log <- lip_df_imputed
+lipid_data_log[,3:ncol(lipid_data_log)] <- log2(lipid_data_log[,3:ncol(lipid_data_log)])
+
+# Scale data 
+lipid_data_scale <- lipid_data_log
+lipid_data_scale[,3:ncol(lip_df_imputed)] <- scale(lipid_data_scale[,3:ncol(lipid_data_scale)])
+
+# Save data frame 
+lipid_data_log_scale <- as_tibble(lipid_data_scale)  %>% 
+  write_csv(paste(path, "data/02_lipidomics_data_imputed_log2_zscore.csv", sep="/")) 
+```
+
+
+Distribution of log and scaled data
+```{r echo=FALSE}
+pivot_lipid_data <- lipid_data_scale %>% 
+  pivot_longer(cols = -c(Sample_ID, Label), 
+               names_to = "Lipid", 
+               values_to = "Concentrations")
+
+# Boxplot of raw metabolite concentrations
+lipid_plot <- pivot_lipid_data %>% 
+  ggplot(mapping = aes(x = Concentrations, y = Lipid)) + 
+  geom_boxplot(alpha = 0.5) + 
+  geom_point(position = position_jitter(seed = 0.4, width = 0.02), size = 0.8) +
+  coord_flip() + 
+  labs(x = 'Log2 and zscore lipid concentrations', title = "Distribution of lipid concentrations") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=0.5))
+lipid_plot
+```
+
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+
+# Combine cleaned and log2/zscore data frames
+```{r echo=FALSE}
+combined_data <- left_join(lipid_data_log_scale, clinical_data_clean,  by = c("Label" = "visit", "Sample_ID" = "id")) %>% 
+  select(Sample_ID, bwcat, randomization, Label, NAFLD, everything()) %>% 
+  write_csv(paste(path, "data/02_combined_data_imputed_log2_zscore.csv", sep="/")) 
+combined_data
+```
+
+
+
+
+#### Correlation: plot of log2 transformed and scaled metabolites
+#Pearson's correlation is used (default)
+```{r}
+correlationplot_lipids <- plot_correlation(lipid_data_log_scale, type = "c")
+#ggsave(paste(path, "results/02_01_metabolite_correlationplot.png", sep="/"), plot = correlationplot_met, device = "png", width = 10, height = 10)
+```
+**Comments:** Some correlations are identified between the metabolites
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------

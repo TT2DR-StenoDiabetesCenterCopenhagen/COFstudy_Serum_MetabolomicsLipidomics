@@ -1,0 +1,966 @@
+---
+title: "Lipidomics Baseline Analysis"
+subtitle: "Biological Network Topology Analysis"
+author: "Sofie Olund Villumsen"
+date: "30/9/2021"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+
+# Initial settings
+```{r echo=FALSE}
+# Clear workspace
+rm(list = ls()) 
+```
+
+Load packages
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(correlation) # Compute rho and p-values of the correlation test for several pairs of variables at once
+library(igraph)
+library(leidenAlg) # Community detection
+```
+
+Load data
+```{r message=FALSE}
+path <- "L:/LovbeskyttetMapper/HCOF Stem Cells/Sofie/Baseline_study/Lipidomics"
+setwd(path)
+
+lipid_data <- read_csv(paste(path, "data/02_lipidomics_data_imputed_log2_zscore.csv", sep="/"))
+lip_clin_data <- read_csv(paste(path, "data/02_combined_data_imputed_log2_zscore.csv", sep="/"))
+top_lipids <- read_tsv(paste(path, "data/04_lipidomics_top_lipids.tsv", sep="/"))
+```
+
+
+Seed: Set a seed for reproducibility of data. Seed sampled with -> sample(1e6, 1)
+```{r}
+set.seed(422053)
+```
+
+
+```{r echo=FALSE}
+# Get a list of lipids
+lip_col_names <- colnames(lipid_data)[3:ncol(lipid_data)]
+```
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+
+# Data preparation
+```{r}
+lip_df <- lipid_data %>% 
+  filter(Label == "A") 
+
+lip_df_2 <- lip_df %>% 
+  select(-everything(), all_of(lip_col_names)) %>% 
+  t()
+
+colnames(lip_df_2) <- lip_df$Sample_ID
+rownames(lip_df_2) <- lip_col_names
+lip_df_2 <- as_tibble(lip_df_2) %>% 
+  mutate(lipids = lip_col_names) %>% 
+  select(lipids, everything()) 
+
+##write_csv(kegg, paste(path, "data/05_pathway.csv", sep="/")) 
+```
+
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+
+# Correlation Analysis 
+The initial network analysis will be an association analysis using Spearmans rank correlations. The network has a big chance of producing false positives, thus the Benjamin-Hochberg (BH) for false discovery rate (FDR).
+```{r}
+# LINK: https://statsandr.com/blog/correlation-coefficient-and-correlation-test-in-r/
+# LINK github correlation package: https://easystats.github.io/correlation/
+
+# Set variable for the cut-off value of the multiple hypothesis testing (< .001***, < .01**, < .1*)
+alpha_thres <- 0.1
+rho_thres <- 0.4
+
+lipid_conc <- lip_df %>% 
+  select(everything(), -c(Label, Sample_ID))
+
+# Compute correlation (rho) and p-values (BH) for several pairs of variables at once.
+corr_matrix <- correlation(lipid_conc, method = "spearman", p_adjust = "BH") %>%  as_tibble()
+```
+
+
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+
+# Positive + Negative Correlations
+The initial network analysis will be an association analysis using Spearmans rank correlations. The network has a big chance of producing false positives, thus the Benjamin-Hochberg (BH) for false discovery rate (FDR).
+```{r}
+corr_matrix_all <- corr_matrix %>%
+  rename(Lipid1 = Parameter1, 
+         Lipid2 = Parameter2, 
+         pval_adj_BH = p) %>% 
+  filter(pval_adj_BH < alpha_thres) %>% 
+  filter(abs(rho) > rho_thres) %>%  # Threshold of rho is set to be over 0.4 (asolute value of rho)
+  select(Lipid1, Lipid2, rho) %>% 
+  mutate(Lipid1 = gsub(",", "_", Lipid1),
+         Lipid2 = gsub(",", "_", Lipid2)) %>% 
+  as.data.frame()
+
+write_csv(corr_matrix_all, paste(path, "data/06_posneg_edge_table.csv", sep="/"))
+
+# Graph of associations, weighted
+g_all <- graph_from_data_frame(corr_matrix_all, directed = FALSE)
+g_all <- set_edge_attr(g_all, "weight", value= corr_matrix_all$rho)
+is_weighted(g_all)
+
+# Plot graph
+plot(g_all, vertex.label = V(g_all)$name)
+```
+
+
+
+## Random network 
+```{r}
+# Number of nodes in positive network
+n_nodes <- unique(c(corr_matrix_all$Lipid1, corr_matrix_all$Lipid2))
+
+# Graph of random network, unweighted, node and edge number based on a network of the same size
+g_random <- erdos.renyi.game(n = length(n_nodes),           # Number of nodes in the graph
+                             p.or.m = length(corr_matrix_all$rho), # Number of edges in the graph
+                             type = "gnm",
+                             directed = FALSE)
+
+# Leidenalg: Community detection algorithm 
+leiden_random <- leiden.community(g_random)
+
+# Modularity of network: in a range from -1 to 1, a value close to 1 indicates strong community structure
+modularity(g_random, membership(leiden_random))
+
+degree_distribution(g_random)
+plot(g_random)
+```
+
+
+## Comparison: pos+neg network
+vs random network
+```{r}
+all_char <- c(gorder(g_all), 
+              gsize(g_all),
+              edge_density(g_all),
+              transitivity(g_all, type = ("undirected")), # global clustering coefficient
+              min_cut(g_all)
+              )
+
+random_char <- c(gorder(g_random), 
+                 gsize(g_random), 
+                 edge_density(g_random),
+                 transitivity(g_random, type = ("undirected")), # global clustering coefficient
+                 min_cut(g_random)
+                 )
+
+network_characteristics <- as_tibble(rbind(all_char, random_char)) %>% 
+  mutate(network_type = c("pos_neg_network", "random_network")) %>% 
+  rename(n_nodes = "V1", n_edges = "V2", density = "V3", cluster_coeff = "V4", min_cut ="V5") %>% 
+  select(network_type, everything())
+network_characteristics
+```
+
+Density = the number of edges a node has, divided by the total possible edges a node could have
+....
+
+
+## Community detection
+Community detection techniques are useful to discover biochemicals with common properties and keep them tightly connected
+```{r}
+# Leidenalg: Community detection algorithm 
+leiden_community <- leiden.community(g_all)
+
+# Community seperation
+g_all_community <- as_tibble(leiden_community$membership)  %>% 
+  mutate(Lipids = leiden_community$names) 
+
+# Modularity of network: in a range from -1 to 1, a value close to 1 indicates strong community structure
+modularity(g_all, membership(leiden_community))
+
+# Number of communities and how many metabolites each contain
+sizes(leiden_community)
+
+
+##wc <- cluster_walktrap(g_pos)
+##plot(wc, g_pos)
+
+##plot(leiden_community$names, g_pos)
+```
+
+```{r}
+# Create table which contain information on the metabolites
+node_table_all <- g_all_community %>% 
+  rename(Community_nr = value) %>% 
+  select(Lipids, Community_nr)
+
+node_table_all2 <- left_join(node_table_all, fdr_lipids, by = c("Lipids" = "Lipids"), keep = TRUE) %>% 
+  rename(Lipids = Lipids.x, fdr_lipids = Lipids.y)
+
+node_table_all2
+write_csv(node_table_all2, paste(path, "data/06_posneg_node_table.csv", sep="/"))
+```
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+
+
+# Positive correlation network
+```{r}
+corr_matrix_pos <- corr_matrix_df %>% 
+  filter(rho > 0) %>% 
+  select(Lipid1, Lipid2, rho) %>% 
+  mutate(Lipid1 = gsub(",", "_", Lipid1),
+         Lipid2 = gsub(",", "_", Lipid2)) %>% 
+  as.data.frame()
+
+write_csv(corr_matrix_pos, paste(path, "data/06_pos_edge_table.csv", sep="/"))
+
+# Graph of positive associations, weighted
+g_pos <- graph_from_data_frame(corr_matrix_pos, directed = FALSE)
+g_pos <- set_edge_attr(g_pos, "weight", value= corr_matrix_pos$rho)
+is_weighted(g_pos)
+
+# Plot graph
+plot(g_pos, vertex.label = V(g_pos)$name)
+```
+The above plot shows a biological network with weights (spearmann). A network makes it easier to discover trends/groupings in data and give us a more holistic view of the correlations between the molecules. By applying a community analysis (leiden algorithm) we are able to discover biochemicals with common properties and keep them tightly connected (check among others the modularity score, as a step in the robustness check of the network). 
+
+
+## Random network
+```{r}
+# Number of nodes in positive network
+n_nodes <- unique(c(corr_matrix_pos$Lipid1, corr_matrix_pos$Lipid2))
+
+# Graph of random network, unweighted, node and edge number based on a network of the same size
+g_random <- erdos.renyi.game(n = length(n_nodes),           # Number of nodes in the graph
+                             p.or.m = length(corr_matrix_pos$rho), # Number of edges in the graph
+                             type = "gnm",
+                             directed = FALSE)
+degree_distribution(g_random)
+plot(g_random)
+```
+
+
+## Comparison: positive vs random network
+```{r}
+pos_char <- c(gorder(g_pos), 
+              gsize(g_pos),
+              diameter(g_pos, directed = FALSE, unconnected = TRUE, weights = NULL), 
+              edge_density(g_pos),
+              transitivity(g_pos, type = ("undirected")), # global clustering coefficient
+              min_cut(g_pos)
+              )
+
+random_char <- c(gorder(g_random), 
+                 gsize(g_random), 
+                 diameter(g_random, directed = FALSE, unconnected = TRUE, weights = NULL), 
+                 edge_density(g_random),
+                 transitivity(g_random, type = ("undirected")), # global clustering coefficient
+                 min_cut(g_random)
+                 )
+
+network_characteristics <- as_tibble(rbind(pos_char, random_char)) %>% 
+  mutate(network_type = c("pos_network", "random_network")) %>% 
+  rename(n_nodes = "V1", n_edges = "V2", diameter = "V3", density = "V4", cluster_coeff = "V5", min_cut ="V6") %>% 
+  select(network_type, everything())
+network_characteristics
+```
+
+Diameter = a higher diameter indicates that there are some nodes in the perifery (classic for a biological network)
+Density = the number of edges a node has, divided by the total possible edges a node could have
+....
+
+
+## Positive graph: Community detection
+Community detection techniques are useful to discover biochemicals with common properties and keep them tightly connected
+```{r}
+# Leidenalg: Community detection algorithm 
+leiden_community <- leiden.community(g_pos)
+
+# Community seperation
+g_pos_community <- as_tibble(leiden_community$membership)  %>% 
+  mutate(Lipids = leiden_community$names) 
+
+# Modularity of network: in a range from -1 to 1, a value close to 1 indicates strong community structure
+modularity(g_pos, membership(leiden_community))
+
+# Number of communities and how many metabolites each contain
+sizes(leiden_community)
+
+##wc <- cluster_walktrap(g_pos)
+##plot(wc, g_pos)
+
+##plot(leiden_community$names, g_pos)
+```
+
+
+```{r}
+# Create table which contain information on the metabolites
+node_table_pos <- g_pos_community %>% 
+  rename(Community_nr = value) %>% 
+  select(Lipids, Community_nr)
+
+node_table_pos2 <- left_join(node_table_pos, fdr_lipids, by = c("Lipids" = "Lipids"), keep = TRUE) %>% 
+  rename(Lipids = Lipids.x, fdr_lipids = Lipids.y)
+
+node_table_pos2
+write_csv(node_table_pos2, paste(path, "data/06_pos_node_table.csv", sep="/"))
+```
+
+
+# Random graph
+```{r}
+# Leidenalg: Community detection algorithm 
+leiden_random <- leiden.community(g_random)
+
+# Modularity of network: in a range from -1 to 1, a value close to 1 indicates strong community structure
+modularity(g_random, membership(leiden_random))
+```
+
+
+- https://igraph.org/r/doc/ 
+
+
+
+
+-------------------------------------------------------------
+ 
+-------------------------------------------------------------
+
+-------------------------------------------------------------
+
+# NBW - lipidomics
+```{r}
+nbw <- lip_clin_data %>% 
+  filter(Label == "A", bwcat == "NBW") %>% 
+  select(-everything(), all_of(lip_col_names))
+
+limma_LBWvsNBW <- read_csv(paste(path, "data/04_lipidomics_limma2_LBWvsNBW_imputed.csv", sep="/"), show_col_types = FALSE)
+```
+
+## Data preparation 
+The initial network analysis will be an association analysis using Spearmans rank correlations. The network has a big chance of producing false positives, thus the Benjamin-Hochberg (BH) for false discovery rate (FDR).
+```{r}
+# LINK: https://statsandr.com/blog/correlation-coefficient-and-correlation-test-in-r/
+# LINK github correlation package: https://easystats.github.io/correlation/
+
+# Set variable for the cut-off value of the multiple hypothesis testing (< .001***, < .01**, < .1*)
+alpha_thres <- 0.1
+rho_thres <- 0.35
+
+biochem_conc_nbw <- nbw %>% 
+  select(everything())
+
+# Compute correlation (rho) and p-values (BH) for several pairs of variables at once.
+corr_matrix_nbw <- correlation(biochem_conc_nbw, method = "spearman", p_adjust = "BH") %>%  as_tibble()
+```
+
+
+## Positive + Negative Correlations
+The initial network analysis will be an association analysis using Spearmans rank correlations. The network has a big chance of producing false positives, thus the Benjamin-Hochberg (BH) for false discovery rate (FDR).
+```{r}
+corr_matrix_nbw_posneg <- corr_matrix_nbw %>%
+  rename(Biochemical1 = Parameter1, 
+         Biochemical2 = Parameter2, 
+         pval_adj_BH = p) %>% 
+  filter(pval_adj_BH < alpha_thres) %>% 
+  filter(abs(rho) > rho_thres) %>%  # Threshold of rho is set to be over 0.4 (asolute value of rho)
+  select(Biochemical1, Biochemical2, rho) %>% 
+  mutate(Biochemical1 = gsub(",", "_", Biochemical1),
+         Biochemical2 = gsub(",", "_", Biochemical2)) %>% 
+  as.data.frame()
+
+write_csv(corr_matrix_nbw_posneg, paste(path, "data/03_NBW_baseline_lipidomics_posneg_edge_table_imputed.csv", sep="/"))
+
+# Graph of associations, weighted
+g_posneg_nbw <- graph_from_data_frame(corr_matrix_nbw_posneg, directed = FALSE)
+g_posneg_nbw <- set_edge_attr(g_posneg_nbw, "weight", value= corr_matrix_nbw_posneg$rho)
+is_weighted(g_posneg_nbw)
+
+# Plot graph
+plot(g_posneg_nbw, vertex.label = V(g_posneg_nbw)$name)
+```
+
+## Community detection
+Community detection techniques are useful to discover biochemicals with common properties and keep them tightly connected
+```{r}
+#Seed: Set a seed for reproducibility of data. Seed sampled with -> sample(1e6, 1)
+set.seed(758474)
+
+# Leidenalg: Community detection algorithm 
+leiden_community_nbw <- leiden.community(g_posneg_nbw)
+
+# Community seperation
+g_posneg_nbw_community <- as_tibble(leiden_community_nbw$membership)  %>% 
+  mutate(Biochemicals = leiden_community_nbw$names) 
+
+# Modularity of network: in a range from -1 to 1, a value close to 1 indicates strong community structure
+modularity(g_posneg_nbw, membership(leiden_community_nbw))
+
+# Number of communities and how many metabolites each contain
+sizes(leiden_community_nbw)
+```
+
+
+## Node table
+```{r}
+# Create table which contain information on the metabolites
+node_table_nbw_posneg <- g_posneg_nbw_community %>% 
+  rename(Community_nr = value) %>% 
+  select(Biochemicals, Community_nr)
+
+pvalue_lipids_NBW <- top_lipids %>% 
+  select(Lipids)
+
+node_table_nbw_posneg2 <- left_join(node_table_nbw_posneg, limma_LBWvsNBW, by = c("Biochemicals" = "Lipids"), keep = TRUE) 
+node_table_nbw_posneg3 <- left_join(node_table_nbw_posneg2, pvalue_lipids_NBW, by = c("Biochemicals" = "Lipids"), keep = TRUE) %>% rename(pvalue_metabolites = Lipids.y, Lipids = Lipids.x) %>% 
+  select(Lipids, Community_nr, logFC, P.Value, adj.P.Val, pvalue_metabolites, HMDB, KEGG, PubChem )
+
+node_table_nbw_posneg3
+write_csv(node_table_nbw_posneg3, paste(path, "data/03_NBW_baseline_lipidomics_posneg_node_table_imputed.csv", sep="/"))
+```
+
+
+
+-------------------------------------------------------------
+ 
+-------------------------------------------------------------
+
+-------------------------------------------------------------
+
+
+# LBW - lipidomics
+```{r}
+lbw <- lip_clin_data %>% 
+  filter(Label == "A", bwcat == "LBW") %>% 
+  select(-everything(), all_of(lip_col_names))
+
+limma_LBWvsNBW <- read_csv(paste(path, "data/04_lipidomics_limma2_LBWvsNBW_imputed.csv", sep="/"), show_col_types = FALSE)
+```
+
+## Data preparation 
+The initial network analysis will be an association analysis using Spearmans rank correlations. The network has a big chance of producing false positives, thus the Benjamin-Hochberg (BH) for false discovery rate (FDR).
+```{r}
+# LINK: https://statsandr.com/blog/correlation-coefficient-and-correlation-test-in-r/
+# LINK github correlation package: https://easystats.github.io/correlation/
+
+# Set variable for the cut-off value of the multiple hypothesis testing (< .001***, < .01**, < .1*)
+alpha_thres <- 0.1
+rho_thres <- 0.35
+
+biochem_conc_lbw <- lbw %>% 
+  select(everything())
+
+# Compute correlation (rho) and p-values (BH) for several pairs of variables at once.
+corr_matrix_lbw <- correlation(biochem_conc_lbw, method = "spearman", p_adjust = "BH") %>%  as_tibble()
+```
+
+
+## Positive + Negative Correlations
+The initial network analysis will be an association analysis using Spearmans rank correlations. The network has a big chance of producing false positives, thus the Benjamin-Hochberg (BH) for false discovery rate (FDR).
+```{r}
+corr_matrix_lbw_posneg <- corr_matrix_lbw %>%
+  rename(Biochemical1 = Parameter1, 
+         Biochemical2 = Parameter2, 
+         pval_adj_BH = p) %>% 
+  filter(pval_adj_BH < alpha_thres) %>% 
+  filter(abs(rho) > rho_thres) %>%  # Threshold of rho is set to be over 0.4 (asolute value of rho)
+  select(Biochemical1, Biochemical2, rho) %>% 
+  mutate(Biochemical1 = gsub(",", "_", Biochemical1),
+         Biochemical2 = gsub(",", "_", Biochemical2)) %>% 
+  as.data.frame()
+
+write_csv(corr_matrix_lbw_posneg, paste(path, "data/03_LBW_baseline_lipidomics_posneg_edge_table_imputed.csv", sep="/"))
+
+# Graph of associations, weighted
+g_posneg_lbw <- graph_from_data_frame(corr_matrix_lbw_posneg, directed = FALSE)
+g_posneg_lbw <- set_edge_attr(g_posneg_lbw, "weight", value= corr_matrix_lbw_posneg$rho)
+is_weighted(g_posneg_lbw)
+
+# Plot graph
+plot(g_posneg_lbw, vertex.label = V(g_posneg_lbw)$name)
+```
+
+## Community detection
+Community detection techniques are useful to discover biochemicals with common properties and keep them tightly connected
+```{r}
+#Seed: Set a seed for reproducibility of data. Seed sampled with -> sample(1e6, 1)
+set.seed(758474)
+
+# Leidenalg: Community detection algorithm 
+leiden_community_lbw <- leiden.community(g_posneg_lbw)
+
+# Community seperation
+g_posneg_lbw_community <- as_tibble(leiden_community_lbw$membership)  %>% 
+  mutate(Biochemicals = leiden_community_lbw$names) 
+
+# Modularity of network: in a range from -1 to 1, a value close to 1 indicates strong community structure
+modularity(g_posneg_lbw, membership(leiden_community_lbw))
+
+# Number of communities and how many metabolites each contain
+sizes(leiden_community_lbw)
+```
+
+
+## Node table
+```{r}
+# Create table which contain information on the metabolites
+node_table_lbw_posneg <- g_posneg_lbw_community %>% 
+  rename(Community_nr = value) %>% 
+  select(Biochemicals, Community_nr)
+
+pvalue_lipids_LBW <- top_lipids %>% 
+  select(Lipids)
+
+node_table_lbw_posneg2 <- left_join(node_table_lbw_posneg, limma_LBWvsNBW, by = c("Biochemicals" = "Lipids"), keep = TRUE) 
+node_table_lbw_posneg3 <- left_join(node_table_lbw_posneg2, pvalue_lipids_LBW, by = c("Biochemicals" = "Lipids"), keep = TRUE) %>% rename(pvalue_lipids = Lipids.y, Lipids = Lipids.x) %>% 
+  select(Lipids, Community_nr, logFC, P.Value, adj.P.Val, pvalue_lipids, HMDB, KEGG, PubChem )
+
+node_table_lbw_posneg3
+write_csv(node_table_lbw_posneg3, paste(path, "data/03_LBW_baseline_lipidomics_posneg_node_table_imputed.csv", sep="/"))
+```
+
+
+-------------------------------------------------------------
+ 
+-------------------------------------------------------------
+
+-------------------------------------------------------------
+
+# -- OMICS NETWORKS
+
+```{r}
+path <- "L:/LovbeskyttetMapper/HCOF Stem Cells/Sofie/Baseline_study/Metabolomics"
+setwd(path)
+
+metabo_data <- read_csv(paste(path, "data/02_combined_data_imputed_log2_zscore.csv", sep="/"), show_col_types = FALSE)
+top_metabolites <- read_tsv(paste(path, "data/04_metabolomics_top_metabolites.tsv", sep="/"), show_col_types = FALSE)
+
+top_met_df <- metabo_data %>% 
+  unite("SampleID_bwcat_NAFLD", c(bwcat, NAFLD, Sample_ID), remove = FALSE) %>% 
+  filter(Label == "A", bwcat == "NBW") %>% 
+  select(SampleID_bwcat_NAFLD, all_of(top_metabolites$Metabolites))
+
+path <- "L:/LovbeskyttetMapper/HCOF Stem Cells/Sofie/Baseline_study/Lipidomics"
+setwd(path)
+```
+
+
+
+# NBW: omics
+```{r}
+nbw_lip_df <- lip_clin_data %>% 
+  unite("SampleID_bwcat_NAFLD", c(bwcat, NAFLD, Sample_ID), remove = FALSE) %>%
+  filter(Label == "A", bwcat == "NBW") %>% 
+  select(-everything(), SampleID_bwcat_NAFLD, all_of(lip_col_names))
+
+nbw_lip_topmet_df <- left_join(nbw_lip_df, top_met_df, by = c("SampleID_bwcat_NAFLD" = "SampleID_bwcat_NAFLD"), keep = FALSE) %>% 
+  select(everything(), -SampleID_bwcat_NAFLD)
+```
+
+## Data preparation 
+The initial network analysis will be an association analysis using Spearmans rank correlations. The network has a big chance of producing false positives, thus the Benjamin-Hochberg (BH) for false discovery rate (FDR).
+```{r}
+# LINK: https://statsandr.com/blog/correlation-coefficient-and-correlation-test-in-r/
+# LINK github correlation package: https://easystats.github.io/correlation/
+
+biochem_conc_nbw_lipmet <- nbw_lip_topmet_df %>% 
+  select(everything())
+
+# Compute correlation (rho) and p-values (BH) for several pairs of variables at once.
+corr_matrix_nbw_lipmet <- correlation(biochem_conc_nbw_lipmet, method = "spearman", p_adjust = "BH") %>%  as_tibble()
+```
+
+
+## Positive + Negative Correlations
+The initial network analysis will be an association analysis using Spearmans rank correlations. The network has a big chance of producing false positives, thus the Benjamin-Hochberg (BH) for false discovery rate (FDR).
+```{r}
+# Set variable for the cut-off value of the multiple hypothesis testing (< .001***, < .01**, < .1*)
+alpha_thres <- 0.1
+rho_thres <- 0.40
+
+corr_matrix_nbw_posneg_lipmet <- corr_matrix_nbw_lipmet %>%
+  rename(Biochemical1 = Parameter1, 
+         Biochemical2 = Parameter2, 
+         pval_adj_BH = p) %>% 
+  filter(pval_adj_BH < alpha_thres) %>% 
+  filter(abs(rho) > rho_thres) %>%  # Threshold of rho is set to be over 0.4 (asolute value of rho)
+  select(Biochemical1, Biochemical2, rho) %>% 
+  mutate(Biochemical1 = gsub(",", "_", Biochemical1),
+         Biochemical2 = gsub(",", "_", Biochemical2)) %>% 
+  as.data.frame()
+
+write_csv(corr_matrix_nbw_posneg_lipmet, paste(path, "data/03_NBW_baseline_lipidomics_topmet_posneg_edge_table_imputed.csv", sep="/"))
+
+# Graph of associations, weighted
+g_posneg_nbw_lipmet <- graph_from_data_frame(corr_matrix_nbw_posneg_lipmet, directed = FALSE)
+g_posneg_nbw_lipmet <- set_edge_attr(g_posneg_nbw_lipmet, "weight", value= corr_matrix_nbw_posneg_lipmet$rho)
+is_weighted(g_posneg_nbw_lipmet)
+
+# Plot graph
+plot(g_posneg_nbw_lipmet, vertex.label = V(g_posneg_nbw_lipmet)$name)
+```
+
+## Community detection
+Community detection techniques are useful to discover biochemicals with common properties and keep them tightly connected
+```{r}
+#Seed: Set a seed for reproducibility of data. Seed sampled with -> sample(1e6, 1)
+set.seed(758474)
+
+# Leidenalg: Community detection algorithm 
+leiden_community_nbw_lipmet <- leiden.community(g_posneg_nbw_lipmet)
+
+# Community seperation
+g_posneg_nbw_community_lipmet <- as_tibble(leiden_community_nbw_lipmet$membership)  %>% 
+  mutate(Biochemicals = leiden_community_nbw_lipmet$names) 
+
+# Modularity of network: in a range from -1 to 1, a value close to 1 indicates strong community structure
+modularity(g_posneg_nbw_lipmet, membership(leiden_community_nbw_lipmet))
+
+# Number of communities and how many metabolites each contain
+sizes(leiden_community_nbw_lipmet)
+```
+
+
+## Node table
+```{r}
+# Create table which contain information on the metabolites
+node_table_nbw_lipmet_posneg <- g_posneg_nbw_community_lipmet %>% 
+  rename(Community_nr = value) %>% 
+  select(Biochemicals, Community_nr)
+
+pvalue_lipids_NBW_lipmet <- top_lipids %>%
+  filter(group1 == "LBW-NAFLD") %>% 
+  select(Lipids) %>% unique()
+
+pvalue_met_NBW_lipmet <- top_metabolites %>% 
+  filter(group1 == "LBW-NAFLD") %>% 
+  select(Metabolites) %>%  unique() %>% rename(Lipids = Metabolites)
+
+pvalue_metlip <- rbind(pvalue_lipids_NBW_lipmet, pvalue_met_NBW_lipmet)
+
+node_table_nbw_lipmet_posneg2 <- left_join(node_table_nbw_lipmet_posneg, pvalue_metlip, by = c("Biochemicals" = "Lipids"), keep = TRUE) %>% 
+  rename(pvalue_biomolecules = Lipids)
+
+node_table_nbw_lipmet_posneg2
+write_csv(node_table_nbw_lipmet_posneg2, paste(path, "data/03_NBW_baseline_lipidomics_topmet_posneg_node_table_imputed.csv", sep="/"), na = "")
+```
+
+
+-------------------------------------------------------------
+ 
+-------------------------------------------------------------
+
+-------------------------------------------------------------
+
+
+# LBW: omics
+```{r}
+lbw_lip_df <- lip_clin_data %>% 
+  unite("SampleID_bwcat_NAFLD", c(bwcat, NAFLD, Sample_ID), remove = FALSE) %>%
+  filter(Label == "A", bwcat == "LBW") %>% 
+  select(-everything(), SampleID_bwcat_NAFLD, all_of(lip_col_names))
+
+lbw_lip_topmet_df <- left_join(lbw_lip_df, top_met_df, by = c("SampleID_bwcat_NAFLD" = "SampleID_bwcat_NAFLD"), keep = FALSE) %>% 
+  select(everything(), -SampleID_bwcat_NAFLD)
+```
+
+
+## Data preparation 
+The initial network analysis will be an association analysis using Spearmans rank correlations. The network has a big chance of producing false positives, thus the Benjamin-Hochberg (BH) for false discovery rate (FDR).
+```{r}
+# LINK: https://statsandr.com/blog/correlation-coefficient-and-correlation-test-in-r/
+# LINK github correlation package: https://easystats.github.io/correlation/
+
+biochem_conc_lbw_lipmet <- lbw_lip_topmet_df %>% 
+  select(everything())
+
+# Compute correlation (rho) and p-values (BH) for several pairs of variables at once.
+corr_matrix_lbw_lipmet <- correlation(biochem_conc_lbw_lipmet, method = "spearman", p_adjust = "BH") %>%  as_tibble()
+```
+
+
+## Positive + Negative Correlations
+The initial network analysis will be an association analysis using Spearmans rank correlations. The network has a big chance of producing false positives, thus the Benjamin-Hochberg (BH) for false discovery rate (FDR).
+```{r}
+# Set variable for the cut-off value of the multiple hypothesis testing (< .001***, < .01**, < .1*)
+alpha_thres <- 0.1
+rho_thres <- 0.40
+
+corr_matrix_lbw_lipmet_posneg <- corr_matrix_lbw_lipmet %>%
+  rename(Biochemical1 = Parameter1, 
+         Biochemical2 = Parameter2, 
+         pval_adj_BH = p) %>% 
+  filter(pval_adj_BH < alpha_thres) %>% 
+  filter(abs(rho) > rho_thres) %>%  # Threshold of rho is set to be over 0.4 (asolute value of rho)
+  select(Biochemical1, Biochemical2, rho) %>% 
+  mutate(Biochemical1 = gsub(",", "_", Biochemical1),
+         Biochemical2 = gsub(",", "_", Biochemical2)) %>% 
+  as.data.frame()
+
+write_csv(corr_matrix_lbw_lipmet_posneg, paste(path, "data/03_LBW_baseline_lipidomics_topmet_posneg_edge_table_imputed.csv", sep="/"))
+
+# Graph of associations, weighted
+g_posneg_lbw_lipmet <- graph_from_data_frame(corr_matrix_lbw_lipmet_posneg, directed = FALSE)
+g_posneg_lbw_lipmet <- set_edge_attr(g_posneg_lbw_lipmet, "weight", value= corr_matrix_lbw_lipmet_posneg$rho)
+is_weighted(g_posneg_lbw_lipmet)
+
+# Plot graph
+plot(g_posneg_lbw_lipmet, vertex.label = V(g_posneg_lbw_lipmet)$name)
+```
+
+## Community detection
+Community detection techniques are useful to discover biochemicals with common properties and keep them tightly connected
+```{r}
+#Seed: Set a seed for reproducibility of data. Seed sampled with -> sample(1e6, 1)
+set.seed(758474)
+
+# Leidenalg: Community detection algorithm 
+leiden_community_lbw_lipmet <- leiden.community(g_posneg_lbw_lipmet)
+
+# Community seperation
+g_posneg_lbw_community_lipmet <- as_tibble(leiden_community_lbw_lipmet$membership)  %>% 
+  mutate(Biochemicals = leiden_community_lbw_lipmet$names) 
+
+# Modularity of network: in a range from -1 to 1, a value close to 1 indicates strong community structure
+modularity(g_posneg_lbw_lipmet, membership(leiden_community_lbw_lipmet))
+
+# Number of communities and how many metabolites each contain
+sizes(leiden_community_lbw_lipmet)
+```
+
+
+## Node table
+```{r}
+# Create table which contain information on the metabolites
+node_table_lbw_posneg_lipmet <- g_posneg_lbw_community_lipmet %>% 
+  rename(Community_nr = value) %>% 
+  select(Biochemicals, Community_nr)
+
+node_table_lbw_posneg_lipmet2 <- left_join(node_table_lbw_posneg_lipmet, pvalue_metlip, by = c("Biochemicals" = "Lipids"), keep = TRUE) %>% 
+  rename(pvalue_biomolecules = Lipids)
+
+node_table_lbw_posneg_lipmet2
+write_csv(node_table_lbw_posneg_lipmet2, paste(path, "data/03_LBW_baseline_lipidomics_topmet_posneg_node_table_imputed.csv", sep="/"), na="")
+```
+
+
+
+-------------------------------------------------------------
+ 
+-------------------------------------------------------------
+
+-------------------------------------------------------------
+
+
+# LBW-NAFLD: omics
+```{r}
+lbw_noNAFLD_lip_df <- lip_clin_data %>% 
+  unite("SampleID_bwcat_NAFLD", c(bwcat, NAFLD, Sample_ID), remove = FALSE) %>%
+  filter(Label == "A", bwcat == "LBW", NAFLD == "FALSE") %>% 
+  select(-everything(), SampleID_bwcat_NAFLD, all_of(lip_col_names))
+
+lbw_noNAFLD_lip_topmet_df <- left_join(lbw_noNAFLD_lip_df, top_met_df, by = c("SampleID_bwcat_NAFLD" = "SampleID_bwcat_NAFLD"), keep = FALSE) %>% 
+  select(everything(), -SampleID_bwcat_NAFLD)
+```
+
+
+## Data preparation 
+The initial network analysis will be an association analysis using Spearmans rank correlations. The network has a big chance of producing false positives, thus the Benjamin-Hochberg (BH) for false discovery rate (FDR).
+```{r}
+# LINK: https://statsandr.com/blog/correlation-coefficient-and-correlation-test-in-r/
+# LINK github correlation package: https://easystats.github.io/correlation/
+
+biochem_conc_lbw_noNAFLD_lipmet <- lbw_noNAFLD_lip_topmet_df %>% 
+  select(everything())
+
+# Compute correlation (rho) and p-values (BH) for several pairs of variables at once.
+corr_matrix_lbw_noNAFLD_lipmet <- correlation(biochem_conc_lbw_noNAFLD_lipmet, method = "spearman", p_adjust = "BH") %>%  as_tibble()
+```
+
+
+## Positive + Negative Correlations
+The initial network analysis will be an association analysis using Spearmans rank correlations. The network has a big chance of producing false positives, thus the Benjamin-Hochberg (BH) for false discovery rate (FDR).
+```{r}
+# Set variable for the cut-off value of the multiple hypothesis testing (< .001***, < .01**, < .1*)
+alpha_thres <- 0.1
+rho_thres <- 0.40
+
+corr_matrix_lbw_noNAFLD_lipmet_posneg <- corr_matrix_lbw_noNAFLD_lipmet %>%
+  rename(Biochemical1 = Parameter1, 
+         Biochemical2 = Parameter2, 
+         pval_adj_BH = p) %>% 
+  filter(pval_adj_BH < alpha_thres) %>% 
+  filter(abs(rho) > rho_thres) %>%  # Threshold of rho is set to be over 0.4 (asolute value of rho)
+  select(Biochemical1, Biochemical2, rho) %>% 
+  mutate(Biochemical1 = gsub(",", "_", Biochemical1),
+         Biochemical2 = gsub(",", "_", Biochemical2)) %>% 
+  as.data.frame()
+
+write_csv(corr_matrix_lbw_noNAFLD_lipmet_posneg, paste(path, "data/03_LBW_noNAFLD_baseline_lipidomics_topmet_posneg_edge_table_imputed.csv", sep="/"))
+
+# Graph of associations, weighted
+g_posneg_lbw_noNAFLD_lipmet <- graph_from_data_frame(corr_matrix_lbw_noNAFLD_lipmet_posneg, directed = FALSE)
+g_posneg_lbw_noNAFLD_lipmet <- set_edge_attr(g_posneg_lbw_noNAFLD_lipmet, "weight", value= corr_matrix_lbw_noNAFLD_lipmet_posneg$rho)
+is_weighted(g_posneg_lbw_noNAFLD_lipmet)
+
+# Plot graph
+plot(g_posneg_lbw_noNAFLD_lipmet, vertex.label = V(g_posneg_lbw_noNAFLD_lipmet)$name)
+```
+
+## Community detection
+Community detection techniques are useful to discover biochemicals with common properties and keep them tightly connected
+```{r}
+#Seed: Set a seed for reproducibility of data. Seed sampled with -> sample(1e6, 1)
+set.seed(758474)
+
+# Leidenalg: Community detection algorithm 
+leiden_community_lbw_noNAFLD_lipmet <- leiden.community(g_posneg_lbw_noNAFLD_lipmet)
+
+# Community seperation
+g_posneg_lbw_noNAFLD_community_lipmet <- as_tibble(leiden_community_lbw_noNAFLD_lipmet$membership)  %>% 
+  mutate(Biochemicals = leiden_community_lbw_noNAFLD_lipmet$names) 
+
+# Modularity of network: in a range from -1 to 1, a value close to 1 indicates strong community structure
+modularity(g_posneg_lbw_noNAFLD_lipmet, membership(leiden_community_lbw_noNAFLD_lipmet))
+
+# Number of communities and how many metabolites each contain
+sizes(leiden_community_lbw_noNAFLD_lipmet)
+```
+
+
+## Node table
+```{r}
+# Create table which contain information on the metabolites
+node_table_lbw_noNAFLD_posneg_lipmet <- g_posneg_lbw_noNAFLD_community_lipmet %>% 
+  rename(Community_nr = value) %>% 
+  select(Biochemicals, Community_nr)
+
+node_table_lbw_noNAFLD_posneg_lipmet2 <- left_join(node_table_lbw_noNAFLD_posneg_lipmet, pvalue_metlip, by = c("Biochemicals" = "Lipids"), keep = TRUE) %>% 
+  rename(pvalue_biomolecules = Lipids)
+
+node_table_lbw_noNAFLD_posneg_lipmet2
+write_csv(node_table_lbw_noNAFLD_posneg_lipmet2, paste(path, "data/03_LBW_noNAFLD_baseline_lipidomics_topmet_posneg_node_table_imputed.csv", sep="/"), na="")
+```
+
+
+
+-------------------------------------------------------------
+ 
+-------------------------------------------------------------
+
+-------------------------------------------------------------
+
+
+# LBW+NAFLD: omics
+```{r}
+lbw_NAFLD_lip_df <- lip_clin_data %>% 
+  unite("SampleID_bwcat_NAFLD", c(bwcat, NAFLD, Sample_ID), remove = FALSE) %>%
+  filter(Label == "A", bwcat == "LBW", NAFLD == "TRUE") %>% 
+  select(-everything(), SampleID_bwcat_NAFLD, all_of(lip_col_names))
+
+lbw_NAFLD_lip_topmet_df <- left_join(lbw_NAFLD_lip_df, top_met_df, by = c("SampleID_bwcat_NAFLD" = "SampleID_bwcat_NAFLD"), keep = FALSE) %>% 
+  select(everything(), -SampleID_bwcat_NAFLD)
+```
+
+
+## Data preparation 
+The initial network analysis will be an association analysis using Spearmans rank correlations. The network has a big chance of producing false positives, thus the Benjamin-Hochberg (BH) for false discovery rate (FDR).
+```{r}
+# LINK: https://statsandr.com/blog/correlation-coefficient-and-correlation-test-in-r/
+# LINK github correlation package: https://easystats.github.io/correlation/
+
+biochem_conc_lbw_NAFLD_lipmet <- lbw_NAFLD_lip_topmet_df %>% 
+  select(everything())
+
+# Compute correlation (rho) and p-values (BH) for several pairs of variables at once.
+corr_matrix_lbw_NAFLD_lipmet <- correlation(biochem_conc_lbw_NAFLD_lipmet, method = "spearman", p_adjust = "BH") %>%  as_tibble()
+```
+
+
+## Positive + Negative Correlations
+The initial network analysis will be an association analysis using Spearmans rank correlations. The network has a big chance of producing false positives, thus the Benjamin-Hochberg (BH) for false discovery rate (FDR).
+```{r}
+# Set variable for the cut-off value of the multiple hypothesis testing (< .001***, < .01**, < .1*)
+alpha_thres <- 0.1
+rho_thres <- 0.40
+
+corr_matrix_lbw_NAFLD_lipmet_posneg <- corr_matrix_lbw_NAFLD_lipmet %>%
+  rename(Biochemical1 = Parameter1, 
+         Biochemical2 = Parameter2, 
+         pval_adj_BH = p) %>% 
+  filter(pval_adj_BH < alpha_thres) %>% 
+  filter(abs(rho) > rho_thres) %>%  # Threshold of rho is set to be over 0.4 (asolute value of rho)
+  select(Biochemical1, Biochemical2, rho) %>% 
+  mutate(Biochemical1 = gsub(",", "_", Biochemical1),
+         Biochemical2 = gsub(",", "_", Biochemical2)) %>% 
+  as.data.frame()
+
+write_csv(corr_matrix_lbw_NAFLD_lipmet_posneg, paste(path, "data/03_LBW_NAFLD_baseline_lipidomics_topmet_posneg_edge_table_imputed.csv", sep="/"))
+
+# Graph of associations, weighted
+g_posneg_lbw_NAFLD_lipmet <- graph_from_data_frame(corr_matrix_lbw_NAFLD_lipmet_posneg, directed = FALSE)
+g_posneg_lbw_NAFLD_lipmet <- set_edge_attr(g_posneg_lbw_NAFLD_lipmet, "weight", value= corr_matrix_lbw_NAFLD_lipmet_posneg$rho)
+is_weighted(g_posneg_lbw_NAFLD_lipmet)
+
+# Plot graph
+plot(g_posneg_lbw_noNAFLD_lipmet, vertex.label = V(g_posneg_lbw_noNAFLD_lipmet)$name)
+```
+
+## Community detection
+Community detection techniques are useful to discover biochemicals with common properties and keep them tightly connected
+```{r}
+#Seed: Set a seed for reproducibility of data. Seed sampled with -> sample(1e6, 1)
+set.seed(758474)
+
+# Leidenalg: Community detection algorithm 
+leiden_community_lbw_NAFLD_lipmet <- leiden.community(g_posneg_lbw_NAFLD_lipmet)
+
+# Community seperation
+g_posneg_lbw_NAFLD_community_lipmet <- as_tibble(leiden_community_lbw_NAFLD_lipmet$membership)  %>% 
+  mutate(Biochemicals = leiden_community_lbw_NAFLD_lipmet$names) 
+
+# Modularity of network: in a range from -1 to 1, a value close to 1 indicates strong community structure
+modularity(g_posneg_lbw_NAFLD_lipmet, membership(leiden_community_lbw_NAFLD_lipmet))
+
+# Number of communities and how many metabolites each contain
+sizes(leiden_community_lbw_NAFLD_lipmet)
+```
+
+
+## Node table
+```{r}
+# Create table which contain information on the metabolites
+node_table_lbw_NAFLD_posneg_lipmet <- g_posneg_lbw_NAFLD_community_lipmet %>% 
+  rename(Community_nr = value) %>% 
+  select(Biochemicals, Community_nr)
+
+node_table_lbw_NAFLD_posneg_lipmet2 <- left_join(node_table_lbw_NAFLD_posneg_lipmet, pvalue_metlip, by = c("Biochemicals" = "Lipids"), keep = TRUE) %>% 
+  rename(pvalue_biomolecules = Lipids)
+
+node_table_lbw_NAFLD_posneg_lipmet2
+write_csv(node_table_lbw_NAFLD_posneg_lipmet2, paste(path, "data/03_LBW_NAFLD_baseline_lipidomics_topmet_posneg_node_table_imputed.csv", sep="/"))
+```
+
+
+
+
+
+
