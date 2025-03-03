@@ -1,0 +1,33 @@
+---
+title: "Metabolomics Baseline Analysis"
+subtitle: "Load and Save Raw Data"
+author: "Sofie Olund Villumsen"
+date: "4/8/2021"
+output: html_document
+---
+
+R markdown doc analyzing and exploring metabolomics data in combination with clinical from the type 2 diabetes overfeeding study of 48 men with mean age of 38 years.
+
+Clear workspace
+```{r}
+rm(list = ls()) 
+```
+
+Load packages
+```{r message=FALSE}
+library(tidyverse)
+library(readxl)
+```
+
+Load data
+```{r message=FALSE}
+path <- "L:/LovbeskyttetMapper/HCOF Stem Cells/Sofie/Baseline_study/Metabolomics"
+  
+setwd(path)
+
+metabo_data <- read_xlsx(paste(path, "data/raw_data/Kopi_af_Overfeed_Metablomics_Final_Output_Simple.xlsx", sep="/")) %>% 
+  write_csv(paste(path, "data/01_metabolomics_data.csv", sep="/"))
+
+clinical_data <- read_xlsx(paste(path, "data/raw_data/hcot_clinical_data.xlsx", sep="/")) %>% 
+  write_csv(paste(path, "data/01_clinical_data.csv", sep="/"))
+```

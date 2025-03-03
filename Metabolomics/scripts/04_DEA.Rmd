@@ -1,0 +1,1696 @@
+---
+title: "Metabolomics Baseline Analysis"
+subtitle: "Differential Expression Analysis (DEA)"
+author: "Sofie Olund Villumsen"
+date: "27/8/2021"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+# Metabolomics
+# Initial settings
+#### Before below analyses, then all data has been (in another script):
+- (Removed outliers)
+- Imputed (mean now - change to KNN)
+- Normalized (log2)
+- Scaled (z-score/autoscale)
+```{r echo=FALSE}
+# Clear workspace
+rm(list = ls()) 
+```
+
+
+Load packages
+```{r message=FALSE}
+library(tidyverse)
+library(limma) # DEA
+library(ggsignif) # Draw significance stars on the ggplots
+library(ComplexHeatmap) # Heatmap
+library(broom) # PCA
+library(PCAtools)
+```
+
+Load data
+```{r message=FALSE}
+path <- "L:/LovbeskyttetMapper/HCOF Stem Cells/Sofie_Databehandling/Baseline_study/Metabolomics"
+setwd(path)
+
+metabo_data <- read_csv(paste(path, "data/02_metabolomics_imputed_data_log2_zscore.csv", sep="/"))
+metabo_database <- read_csv(paste(path, "data/02_metabolite_database_info.csv", sep="/")) %>% 
+  mutate(mmetabolites = sub("^(\\d)", "X\\1", metabolites)) %>% 
+  mutate(mmetabolites = str_replace_all(mmetabolites, "[- ,]", "."))
+
+combined_data <- read_csv(paste(path, "data/02_combined_data_imputed_log2_zscore.csv", sep="/")) %>% 
+  mutate(bwcat_NAFLD_labs = case_when(bwcat_NAFLD == 'NBW_FALSE' ~ "NBW",
+                                      bwcat_NAFLD == 'LBW_FALSE' ~ "LBW w/o NAFLD",
+                                      bwcat_NAFLD == 'LBW_TRUE' ~ "LBW w/ NAFLD"))
+
+clin_data_selected <- read_csv(paste(path, "data/raw_data/selected_clinical_data.csv", sep="/")) %>%
+  mutate_if(is.logical, as.character) %>% 
+  mutate(bwcat_NAFLD = str_c(bwcat, NAFLD, sep = "_"))
+```
+
+```{r echo=FALSE}
+# Variables
+log_thres_limma <- 0 # Only used when there are more variables
+pval_thres_limma <- 0.1 # pval < 0.1
+```
+
+```{r echo=FALSE}
+# Get a list of metabolites
+metabol_names <- colnames(metabo_data)[3:ncol(metabo_data)]
+```
+
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+
+```{r}
+# Combine the two data frames
+metabo_data_baseline <- combined_data %>% 
+  filter(Label == "A") %>% 
+  select(-everything(), bwcat, bwcat_NAFLD, all_of(colnames(metabo_data)))
+
+metabolite_data <- metabo_data_baseline %>% 
+  select(-everything(), all_of(metabol_names)) %>% 
+  t()
+
+colnames(metabolite_data) <- metabo_data_baseline$Sample_ID
+metabolite_data <- as.data.frame(metabolite_data)
+
+# Groups in the lipidomics data
+group <- metabo_data_baseline %>% 
+  mutate(bwcat_binary = case_when(bwcat == "NBW" ~ "0",
+                                  bwcat == "LBW" ~ "1", 
+                                  TRUE ~ bwcat)) %>% 
+  mutate(across(.cols = 5:bwcat_binary, as.double))
+```
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+# Two group comparisons
+```{r}
+# NBW vs LBW (baseline) with limma
+# Look in limma users guide
+group_f <- factor(group$bwcat, levels=c("NBW","LBW"))
+design <- model.matrix(~ group_f)
+colnames(design) <- c("NBW","LBWvsNBW")
+
+fit <- lmFit(metabolite_data, design)
+fit <- eBayes(fit)
+
+topmetabolites <- topTable(fit, n = 65, coef="LBWvsNBW", adjust="BH")
+
+# For pathway analysis in IPA: Add ID's from KEGG, HMDB, PubChem and CheBI to top metabolites
+stats_limma <- rownames_to_column(topmetabolites, "Metabolites")
+stats_limma_2groups <- left_join(x = as_tibble(stats_limma), 
+                           y = as_tibble(metabo_database), 
+                           by = c("Metabolites" = "mmetabolites"))  %>%
+  write_csv(paste(path, "data/04_metabolomics_limma1_2groups_imputed.csv", sep="/")) 
+```
+
+
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+# Two group comparisons: Plot 
+```{r echo=FALSE, message=FALSE}
+# Plot top metabolites with p-value < 0.05 (plotted p-values are NOT FDR-adjusted)
+topmetabolites_2groups <- stats_limma_2groups %>% 
+  filter(P.Value < 0.05) 
+
+# Pivot data frame 
+pivot_metabo_data_baseline <- metabo_data_baseline %>% 
+  pivot_longer(cols = -c(Sample_ID, bwcat, bwcat_NAFLD, Label), 
+               names_to = "Metabolite", 
+               values_to = "Concentrations")
+
+# Reorder the conditions order
+pivot_metabo_data_baseline$bwcat <- factor(pivot_metabo_data_baseline$bwcat , levels=c("NBW", "LBW"))
+
+# Boxplot of significant lipids
+metabolite_plot <- pivot_metabo_data_baseline %>% 
+  filter(Metabolite %in% topmetabolites_2groups$Metabolites) %>%
+  ggplot(mapping = aes(x = Concentrations, y = bwcat, fill = bwcat)) + 
+  geom_violin(alpha = 0.5, width = 1) + 
+  geom_boxplot(width=0.1, color="black", alpha=0.2) +
+  geom_point(position = position_jitter(seed = 0.4, width = 0.02), size = 0.8) +
+  coord_flip() + 
+  labs(x = "Log2 and zscore of metabolite abundance", y = "Group") +    
+  facet_wrap(~ Metabolite) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("#32CD32", "#6495ED"), name = "Group") 
+
+metabolite_plot
+topmetabolites_2groups
+ggsave(paste(path, "results/04_01_boxplot_2groups_imputed.png", sep="/"), plot = metabolite_plot, device = "png", width = 10, height = 10)
+```
+
+**Current findings:** When comparing the two study groups NBW and LBW, we observe an indication (the findings are NOT significant when FDR corrected) of difference between the 3 metabolites represented in the above table and boxplot. The LBW group had higher levels of alpha-Tocopherol and Cholesterol (p-value < 0.05), and lower levels of Hippuric acid (p-value < 0.05) compared to the NBW group.
+
+**Minas findings:** The full LBW group had increased serum cholesterol and alpha tocopherol as well as decreased hippuric acid levels compared to NBW controls (Suppl. Table 6 in baseline paper).
+
+**Comparison:** Same findings, however !different values!, due to data pre-processing. It is important to highlight that the differences between the groups are NOT significant, only after the p-values have been FDR adjusted (p-values vs. FDR)
+
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+
+# Three group comparisons
+```{r}
+# LBW_FALSE vs NBW_FALSE vs LBW_TRUE (baseline) with limma
+# Look in limma users guide
+group_f <- factor(group$bwcat_NAFLD, levels=c("NBW_FALSE","LBW_FALSE","LBW_TRUE"))
+design <- model.matrix(~0+group_f)
+colnames(design) <- c("NBW_FALSE","LBW_FALSE","LBW_TRUE")
+
+fit <- lmFit(metabolite_data, design)
+contrast.matrix <- makeContrasts(LBW_FALSE-NBW_FALSE, LBW_TRUE-LBW_FALSE, LBW_TRUE-NBW_FALSE,
+                                 levels=design)
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+
+# A list of top metabolites for the different comparisons are obtained from x1, x2 and x3
+x1 <- topTable(fit2, coef=1, adjust="BH", n = 65) # LBW_FALSEvsNBW_FALSE
+x2 <- topTable(fit2, coef=2, adjust="BH", n = 65) # LBW_TRUEvsLBW_FALSE
+x3 <- topTable(fit2, coef=3, adjust="BH", n = 65) # LBW_TRUEvsNBW_FALSE
+
+# A top 10 table of metabolites which vary between the three bwcat_NAFLD groups (metabolites with small p-values)
+xtotal <- topTable(fit2, number=65, adjust="BH")
+
+# Add ID's from KEGG, HMDB, PubChem and CheBI to top metabolites
+stats_limma <- rownames_to_column(xtotal, "Metabolites")
+stats_limma_3groups <- left_join(x = as_tibble(stats_limma), 
+                                   y = as_tibble(metabo_database), 
+                                   by = c("Metabolites" = "mmetabolites"))
+```
+
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+
+# Three group comparisons: Plot
+```{r echo=FALSE, message=FALSE}
+# Plot top metabolites with p-value < 0.05 (plotted p-values are NOT FDR-adjusted)
+topmetabolites_3groups <- stats_limma_3groups %>% 
+  filter(P.Value <= 0.05) 
+
+# Pivot data frame 
+pivot_metabo_data_baseline <- metabo_data_baseline %>% 
+  pivot_longer(cols = -c(Sample_ID, bwcat, bwcat_NAFLD, Label), 
+               names_to = "Metabolite", 
+               values_to = "Concentrations") %>%  
+  mutate(bwcat_NAFLD_labs = case_when(bwcat_NAFLD == 'NBW_FALSE' ~ "NBW",
+                                      bwcat_NAFLD == 'LBW_FALSE' ~ "LBW w/o NAFLD",
+                                      bwcat_NAFLD == 'LBW_TRUE' ~ "LBW w/ NAFLD"))
+
+# Use pivot data frame and reorder the conditions order
+pivot_metabo_data_baseline$bwcat_NAFLD_labs <- factor(pivot_metabo_data_baseline$bwcat_NAFLD_labs , levels=c("NBW", "LBW w/o NAFLD", "LBW w/ NAFLD"))
+
+# Boxplot of significant lipids
+metabolite_plot <- pivot_metabo_data_baseline %>% 
+  filter(Metabolite %in% topmetabolites_3groups$Metabolites) %>%
+  ggplot(mapping = aes(x = Concentrations, y = bwcat_NAFLD_labs, fill = bwcat_NAFLD_labs)) + 
+  geom_violin(alpha = 0.5, width = 1) + 
+  geom_boxplot(width=0.1, color="black", alpha=0.2) +
+  geom_point(position = position_jitter(seed = 0.4, width = 0.02), size = 0.8) +
+  coord_flip() + 
+  labs(x = 'Log2 and zscore of metabolite concentrations', title = "Baseline: Difference in metabolite conc. between 3 groups",
+       subtitle = "NBW÷NAFLD vs LBW÷NAFLD vs  LBW+NAFLD with P-value < 0.05 (no FDR correction is done)") + 
+  scale_fill_discrete(name="Bwcat_NAFLD") +   
+  facet_wrap(~ Metabolite) +
+  scale_fill_manual(values = c("#32CD32", "#6495ED", "#FA8072"))  # (Green, Blue)
+metabolite_plot
+topmetabolites_3groups
+ggsave(paste(path, "results/04_02_boxplot_3groups.png", sep="/"), plot = metabolite_plot, device = "png", width = 10, height = 10)
+```
+
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+
+# 1. comparison: LBW÷NAFLD vs NBW÷NAFLD
+```{r echo=FALSE, message=FALSE}
+# Comparison of LBW_FALSEvsNBW_FALSE
+# Add ID's from KEGG, HMDB, PubChem and CheBI to top metabolites
+stats_limma_1 <- rownames_to_column(x1, "Metabolites")
+stats_limma_1comparison <- left_join(x = as_tibble(stats_limma_1), y = as_tibble(metabo_database), 
+                                      by = c("Metabolites" = "mmetabolites")) %>% 
+  write_csv(paste(path, "data/04_metabolomics_limma3_LBW_FALSEvsNBW_FALSE_imputed.csv", sep="/")) 
+
+# Plot top metabolites with FDR =< 0.1
+topmetabolites_1comparison <- stats_limma_1comparison %>% 
+  filter(P.Value <= 0.05) 
+
+# Use pivot data frame and reorder the conditions order
+pivot_metabo_data_baseline$bwcat_NAFLD_labs <- factor(pivot_metabo_data_baseline$bwcat_NAFLD_labs , levels=c("NBW", "LBW w/o NAFLD", "LBW w/ NAFLD"))
+
+# Boxplot of significant lipids
+metabolite_plot <- pivot_metabo_data_baseline %>% 
+  filter(Metabolite %in% topmetabolites_1comparison$Metabolites) %>%
+  ggplot(mapping = aes(x = Concentrations, y = bwcat_NAFLD_labs, fill = bwcat_NAFLD_labs)) + 
+  geom_violin(alpha = 0.5, width = 1) + 
+  geom_boxplot(width=0.1, color="black", alpha=0.2) +
+  geom_point(position = position_jitter(seed = 0.4, width = 0.02), size = 0.8) +
+  coord_flip() + 
+  labs(x = "Log2 and zscore of metabolite abundance", y = "Group") +    
+  facet_wrap(~ Metabolite) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("#32CD32", "#6495ED", "#FA8072"), name = "Group")  # (Green, Blue, Red) 
+  #geom_signif(comparisons = list(c("LBW_FALSE", "NBW_FALSE")), 
+   #           map_signif_level=TRUE)
+metabolite_plot
+topmetabolites_1comparison
+ggsave(paste(path, "results/04_03_boxplot_LBW_FALSEvsNBW_FALSE_imputed.png", sep="/"), plot = metabolite_plot, device = "png", width = 10, height = 10)
+```
+
+**Current findings:** When comparing the two study groups NBW and LBW÷NAFLD, we observe lower levels of Hippuric acid (FDR <= 0.1).
+
+**Minas findings:** The LBW÷NAFLD group had significantly lower hippuric acid (p-value < 0.05) level compared to NBW controls (From baseline paper).
+
+**Comparison:** More or less same findings, however !different values!, due to data pre-processing. It is important to highlight that the differences between the groups are NOT significant, only after the p-values have been FDR adjusted (p-values vs. FDR). 
+
+
+-----------------------------------------------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------------------------------------------------------
+
+# 2. comparison: LBW+NAFLD vs LBW÷NAFLD
+```{r echo=FALSE, message=FALSE}
+# Comparison of LBW_TRUEvsLBW_FALSE
+# Add ID's from KEGG, HMDB, PubChem and CheBI to top metabolites
+stats_limma_2 <- rownames_to_column(x2, "Metabolites")
+stats_limma_2comparison <- left_join(x = as_tibble(stats_limma_2), y = as_tibble(metabo_database), 
+                                      by = c("Metabolites" = "mmetabolites")) %>% 
+  write_csv(paste(path, "data/04_metabolomics_limma2_LBW_TRUEvsLBW_FALSE_imputed.csv", sep="/")) 
+
+# Plot top metabolites with FDR =< 0.1
+topmetabolites_2comparison <- stats_limma_2comparison  %>%
+  filter(P.Value < 0.05) 
+
+# Use pivot data frame and reorder the conditions order
+pivot_metabo_data_baseline$bwcat_NAFLD_labs <- factor(pivot_metabo_data_baseline$bwcat_NAFLD_labs , levels=c("NBW", "LBW w/o NAFLD", "LBW w/ NAFLD"))
+
+# Boxplot of significant lipids
+metabolite_plot <- pivot_metabo_data_baseline %>% 
+  filter(Metabolite %in% topmetabolites_2comparison$Metabolites) %>%
+  ggplot(mapping = aes(x = Concentrations, y = bwcat_NAFLD_labs, fill = bwcat_NAFLD_labs)) + 
+  geom_violin(alpha = 0.5, width = 1) + 
+  geom_boxplot(width=0.1, color="black", alpha=0.2) +
+  geom_point(position = position_jitter(seed = 0.4, width = 0.02), size = 0.8) +
+  coord_flip() + 
+  labs(x = "Log2 and zscore of metabolite abundance", y = "Group") +   
+  facet_wrap(~ Metabolite) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("#32CD32", "#6495ED", "#FA8072"), name = "Group")  # (Green, Blue, Red) 
+  #geom_signif(comparisons = list(c("LBW_TRUE", "LBW_FALSE")), 
+   #           map_signif_level=TRUE)
+metabolite_plot
+topmetabolites_2comparison
+ggsave(paste(path, "results/04_04_boxplot_LBW_TRUEvsLBW_FALSE_imputed.png", sep="/"), plot = metabolite_plot, device = "png", width = 10, height = 10)
+```
+
+**Current findings:** When comparing the two study groups LBW÷NAFLD and LBW+NAFLD Compared to the LBW÷NAFLD group the LBW+NAFLD group had higher levels of Oxalic acid (FDR < 0.1), Tyrosine (FDR < 0.1), Ornithine (FDR < 0.1), Glutamic acid (FDR < 0.1), Citrulline (p-value < 0.05), Tryptophan (p-value < 0.05), and lower levels of Linoleic acid (p-value < 0.05), 3,4,5-Trihydroxypentanoic acid (p-value < 0.05), Arachidonic acid (p-value < 0.05).
+
+**Minas findings:** The LBW+NAFLD individuals had significantly higher levels of glutamic acid, ornithine, tyrosine, tryptophan, and oxalic acid compared to LBW÷NAFLD (Figure 3, Suppl. Table 7 in baseline paper).
+
+**Comparison:** More or less same findings, however !different values!, due to data pre-processing. It is important to highlight that the differences between the groups are NOT significant, only after the p-values have been FDR adjusted (p-values vs. FDR). The only difference is that I also find that there is a difference in the conc. of Citrulline, Linoleic acid, 3,4,5-Trihydroxypentanoic acid and Arachidonic acid between the two groups (Mina doesn't find this).
+
+
+-----------------------------------------------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------------------------------------------------------
+
+# 3. comparison: LBW+NAFLD vs NBW÷NAFLD
+```{r echo=FALSE, message=FALSE}
+# Comparison of LBW_TRUEvsNBW_FALSE
+# Add ID's from KEGG, HMDB, PubChem and CheBI to top metabolites
+stats_limma_3 <- rownames_to_column(x3, "Metabolites")
+stats_limma_3comparison <- left_join(x = as_tibble(stats_limma_3), y = as_tibble(metabo_database), 
+                                      by = c("Metabolites" = "mmetabolites")) %>% 
+  write_csv(paste(path, "data/04_metabolomics_limma2_LBW_TRUEvsNBW_FALSE_imputed.csv", sep="/")) 
+
+# Plot top metabolites with FDR =< 0.1
+topmetabolites_3comparison <- stats_limma_3comparison %>% 
+  filter(P.Value < 0.05) 
+
+# Use pivot data frame and reorder the conditions order
+pivot_metabo_data_baseline$bwcat_NAFLD_labs <- factor(pivot_metabo_data_baseline$bwcat_NAFLD_labs , levels=c("NBW", "LBW w/o NAFLD", "LBW w/ NAFLD"))
+
+# Boxplot of significant lipids
+metabolite_plot <- pivot_metabo_data_baseline %>% 
+  filter(Metabolite %in% topmetabolites_3comparison$Metabolites) %>%
+  ggplot(mapping = aes(x = Concentrations, y = bwcat_NAFLD_labs, fill = bwcat_NAFLD_labs))  + 
+  geom_violin(alpha = 0.5, width = 1) + 
+  geom_boxplot(width=0.1, color="black", alpha=0.2) +
+  geom_point(position = position_jitter(seed = 0.4, width = 0.02), size = 0.8) +
+  coord_flip() + 
+  labs(x = "Log2 and zscore of metabolite abundance", y = "Group") +   
+  facet_wrap(~ Metabolite) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("#32CD32", "#6495ED", "#FA8072"), name = "Group")  # (Green, Blue, Red)
+ # geom_signif(comparisons = list(c("LBW_TRUE", "NBW_FALSE")), 
+  #            map_signif_level=TRUE)  + # (Green, Blue, Red) 
+  #geom_signif(comparisons = list(c("LBW_TRUE", "LBW_FALSE")), 
+    #          map_signif_level=TRUE)   + # (Green, Blue, Red) 
+  #geom_signif(comparisons = list(c("LBW_FALSE", "NBW_FALSE")), 
+   #           map_signif_level=TRUE)
+metabolite_plot
+topmetabolites_3comparison
+ggsave(paste(path, "results/04_04_boxplot_LBW_TRUEvsNBW_FALSE_imputed.png", sep="/"), plot = metabolite_plot, device = "png", width = 10, height = 10)
+# OBS: No metabolites with significant (FDR <= 0.1) differences between LBW+NAFLD vs NBW÷NAFLD
+```
+
+**Current findings:** When comparing the two study groups NBW and LBW+NAFLD, we observe an indication (the findings are NOT significant when FDR corrected) of difference between the 7 metabolites represented in the above table and boxplot. Compared to the NBW group the LBW+NAFLD group had higher levels of Ornithine, Tyrosine, Alpha-Tocopherol, Tryptophan, Cholesterol, Oxilic acid and Glutamic acid (p-value < 0.05), and lower levels of Linoleic acid (p-value < 0.05).
+
+**Minas findings:** The LBW+NAFLD individuals had significantly higher levels of glutamic acid, aminomalonic acid, ornithine, tyrosine, tryptophan, cholesterol, and alpha tocopherol (Figure 3, Suppl. Table 7 in baseline paper) compared to NBW controls.
+
+**Comparison:** More or less same findings, however !different values!, due to data pre-processing. It is important to highlight that the differences between the groups are NOT significant, only after the p-values have been FDR adjusted (p-values vs. FDR). The only difference is that Mina finds that the conc. of aminomalonic acid is different between the two groups (I don't fin this in my analysis) and I find that there is a difference in the conc. of Linoleic acid between the two groups (Mina doesn't find this).
+
+
+
+#Compare all groups to each other
+```{r}
+pavlue_metabolites <- c(topmetabolites_3comparison$Metabolites,  topmetabolites_2comparison$Metabolites, topmetabolites_1comparison$Metabolites)
+
+c3 <- topmetabolites_3comparison %>% 
+  rename(p.value = P.Value)
+
+c2 <- topmetabolites_2comparison %>% 
+  rename(p.value = P.Value)
+
+c1 <- topmetabolites_1comparison %>% 
+  rename(p.value = P.Value) %>% 
+  mutate(group1 = "LBW_FALSE", group2 = "NBW_FALSE")
+
+```
+
+```{r}
+
+# Boxplot of significant lipids
+metabolite_plot <- pivot_metabo_data_baseline %>% 
+  filter(Metabolite %in% pavlue_metabolites) %>%
+  ggplot(mapping = aes(x = Concentrations, y = bwcat_NAFLD, fill = bwcat_NAFLD))  + 
+  geom_violin(alpha = 0.5, width = 1) + 
+  geom_boxplot(width=0.1, color="black", alpha=0.2) + 
+  geom_point(position = position_jitter(seed = 0.4, width = 0.02), size = 0.8) +
+  coord_flip() + 
+  labs(x = 'Log2 and zscore of metabolite concentrations', title = "Baseline: Difference in metabolite conc. between:",
+       subtitle = "NS (No significance), *(P-value<0.05), and **(FDR=0.1)") + 
+  scale_fill_discrete(name="Bwcat_NAFLD") +   
+  facet_wrap(~ Metabolite) +
+  scale_fill_manual(values = c("#32CD32", "#6495ED", "#FA8072")) # (Green, Blue, Red) 
+  #stat_pvalue_manual(yy, label = "p.value", y.position = 1)
+  
+  
+  #geom_signif(comparisons = list(c("LBW_TRUE", "NBW_FALSE")), 
+   #           map_signif_level=TRUE, test.args = c3) +  # (Green, Blue, Red) 
+  #geom_signif(comparisons = list(c("LBW_TRUE", "LBW_FALSE")), 
+   #           map_signif_level=TRUE, test.args = c2)  +  # (Green, Blue, Red) 
+  #geom_signif(comparisons = list(c("LBW_FALSE", "NBW_FALSE")), 
+   #          map_signif_level=TRUE, test.args = c1)
+
+metabolite_plot
+ggsave(paste(path, "results/04_04_boxplot_LBW_TRUEvsLBW_FALSE_imputed.png", sep="/"), plot = metabolite_plot, device = "png", width = 10, height = 10)
+```
+
+
+```{r}
+c1 <- c1 %>% mutate(group1 = "LBW-NAFLD", group2 = "NBW") %>% select(Metabolites, group1, group2, logFC, p.value, adj.P.Val)
+
+c2 <- c2 %>% mutate(group1 = "LBW+NAFLD", group2 = "LBW-NAFLD") %>% select(Metabolites, group1, group2, logFC, p.value, adj.P.Val)
+
+c3 <- c3 %>% mutate(group1 = "LBW+NAFLD", group2 = "NBW") %>% select(Metabolites, group1, group2, logFC, p.value, adj.P.Val)
+
+groups2 <- topmetabolites_2groups %>% rename(p.value = P.Value) %>%  mutate(group1 = "NBW", group2 = "LBW") %>% select(Metabolites, group1, group2, logFC, p.value, adj.P.Val)
+
+combined_comparison_table <- rbind(c1, c2, c3, groups2) %>% 
+  mutate(logFC=round(logFC, digits = 4), p.value=round(p.value, digits = 4), adj.P.Val=round(adj.P.Val, digits = 4)) %>% 
+  write_tsv(paste(path, "data/04_metabolomics_top_metabolites.tsv", sep="/")) 
+
+combined_comparison_table
+
+unique(combined_comparison_table$Metabolites)
+```
+
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+# P-value < 0.5 metabolites
+
+Differential abundant metabolites found between the groups (NBW, LBW÷NAFLD and LBW+NAFLD)
+```{r, echo=FALSE}
+# Combine the two data frames
+metabolite_data_unite <- combined_data %>% 
+  filter(Label == "A") %>% 
+  unite("SampleID_bwcat_NAFLD", c(bwcat_NAFLD_labs, Sample_ID), remove = TRUE) %>% 
+  filter(SampleID_bwcat_NAFLD != "LBW_FALSE_066") %>% #Outlier which is removed (LBW w/o NAFLD)
+
+  select(SampleID_bwcat_NAFLD, all_of(topmetabolites_3comparison$Metabolites), all_of(topmetabolites_2comparison$Metabolites), all_of(topmetabolites_1comparison$Metabolites), all_of(topmetabolites_2groups$Metabolites))
+
+# Save metabolites with pvalue < 0.05
+write_csv(as_tibble(colnames(metabolite_data_unite)), paste(path, "data/04_pvalue_metabolites_imputed.csv", sep="/"))
+
+# Prepare data for heatmap
+metabolite_data_dendro <- metabolite_data_unite %>% 
+  select(all_of(topmetabolites_3comparison$Metabolites), all_of(topmetabolites_2groups$Metabolites), all_of(topmetabolites_1comparison$Metabolites), all_of(topmetabolites_2comparison$Metabolites)) %>% 
+  t()
+
+colnames(metabolite_data_dendro) <- metabolite_data_unite$SampleID_bwcat_NAFLD
+metabolite_data_dendro <- as.matrix(metabolite_data_dendro)
+
+# Prepare data for group ordered heatmap
+metabolite_data_heatmap <- metabolite_data_dendro[,order(colnames(metabolite_data_dendro),decreasing = TRUE)]
+metabolite_data_heatmap <- as.matrix(metabolite_data_heatmap) 
+```
+
+## Heatmap group mean
+```{r}
+
+test <- combined_data %>% 
+  filter(Label == "A") %>% 
+  select(bwcat_NAFLD_labs, all_of(topmetabolites_3comparison$Metabolites), all_of(topmetabolites_2comparison$Metabolites), all_of(topmetabolites_1comparison$Metabolites), all_of(topmetabolites_2groups$Metabolites)) %>% 
+  group_by(bwcat_NAFLD_labs) %>% 
+  summarise_all(list(mean)) 
+
+trans_test <- test %>%
+  select(everything(), -bwcat_NAFLD_labs) %>% 
+  t()
+ 
+colnames(trans_test) <- test$bwcat_NAFLD_labs
+trans_test <- as.matrix(trans_test)
+
+data_heatmap <- trans_test[,order(colnames(trans_test),decreasing = TRUE)]
+
+
+# Heatmap
+col1 = list(a = c(NBW = "#32CD32", `LBW w/ NAFLD` = "#FA8072", `LBW w/o NAFLD` = "#6495ED"))# (Green, Red, Blue))
+
+Group <- gsub("_\\d+$", "", colnames(data_heatmap))
+ha <- HeatmapAnnotation(df = data.frame(Group = Group), col = col1, show_annotation_name = TRUE) 
+
+
+Heatmap(data_heatmap, name = "Abundance", top_annotation = ha, 
+    show_column_names = FALSE, heatmap_legend_param = list(title = "z-score")) 
+
+
+
+
+df <- colnames(data_heatmap)
+
+ha <- HeatmapAnnotation(Group = df,
+                        col = list(Group = c("NBW" = "#32CD32", 
+                                             "LBW w/ NAFLD" = "#FA8072",
+                                             "LBW w/o NAFLD" = "#6495ED"))) # (Green, Blue, Red)))
+
+Heatmap(data_heatmap, name = "Log2 \nnormalized \nabundance", top_annotation = ha, #bottom_annotation = hah, 
+        column_order = sort(colnames(data_heatmap), decreasing = TRUE),
+        show_column_names = FALSE, cluster_columns = FALSE, column_split = df,
+        column_gap = unit(3, "mm") , heatmap_width = unit(3, "npc"))
+
+
+# Save as png file
+png(paste(path, "results/04_heatmap_groupmean.png", sep="/"),
+    width = 6*400,        # 5 x 300 pixels
+    height = 6*300,
+    res = 200,            # 300 pixels per inch
+    pointsize = 10)      # font size) 
+Heatmap(data_heatmap, name = "Log2 \nnormalized \nabundance", top_annotation = ha, #bottom_annotation = hah, 
+        column_order = sort(colnames(data_heatmap), decreasing = TRUE),
+        show_column_names = FALSE, cluster_columns = FALSE, column_split = df,
+        column_gap = unit(3, "mm") , heatmap_width = unit(3, "npc"))
+dev.off()
+```
+
+
+## Heatmap with dendrogram
+```{r echo=FALSE}
+col1 = list(a = c(NBW = "#32CD32", `LBW w/ NAFLD` = "#6495ED", `LBW w/o NAFLD` = "#FA8072"))# (Green, Blue, Red))
+
+Group <- gsub("_\\d+$", "", colnames(metabolite_data_dendro))
+ha <- HeatmapAnnotation(df = data.frame(Group = Group), col = col1, show_annotation_name = TRUE) 
+
+
+Heatmap(metabolite_data_dendro, name = "z-score", top_annotation = ha, 
+    show_column_names = FALSE, heatmap_legend_param = list(title = "z-score")) 
+
+# Save as png file
+png(paste(path, "results/04_05_heatmap_dendrogram.png", sep="/"),
+    width = 6*300,        # 5 x 300 pixels
+    height = 6*300,
+    res = 200,            # 300 pixels per inch
+    pointsize = 10)      # font size)   
+Heatmap(metabolite_data_dendro, name = "z-score", top_annotation = ha, 
+    show_column_names = FALSE) 
+dev.off()
+```
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+
+## Heatmap split by groups 
+LBW÷NAFLD, LBW+NAFLD and NBW
+```{r echo=FALSE}
+
+df <- gsub("_\\d+$", "", colnames(metabolite_data_heatmap))
+
+ha <- HeatmapAnnotation(Group = df,
+                        col = list(Group = c("NBW" = "#32CD32", 
+                                             "LBW w/o NAFLD" = "#6495ED", 
+                                             "LBW w/ NAFLD" = "#FA8072"))) # (Green, Blue, Red)))
+
+Heatmap(metabolite_data_heatmap, name = "z-score", top_annotation = ha, 
+        column_order = sort(colnames(metabolite_data_heatmap), decreasing = TRUE),
+        show_column_names = FALSE, cluster_columns = FALSE, column_split = df,
+        column_gap = unit(4, "mm") , heatmap_width = unit(5, "npc")) 
+
+
+# Save as png file
+png(paste(path, "results/04_07_heatmap_bwcat_NAFLD.png", sep="/"),
+    width = 6*400,        # 5 x 300 pixels
+    height = 6*300,
+    res = 200,            # 300 pixels per inch
+    pointsize = 10)      # font size) 
+Heatmap(metabolite_data_heatmap, name = "z-score", top_annotation = ha, 
+        column_order = sort(colnames(metabolite_data_heatmap), decreasing = TRUE),
+        show_column_names = FALSE, cluster_columns = FALSE, column_split = df,
+        column_gap = unit(6, "mm") , heatmap_width = unit(5, "npc")) 
+dev.off()
+```
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+## PCA of retained metabolites with p-value < 0.5
+Check how well the metabolites seperates the groups
+```{r message=FALSE, echo=FALSE}
+top_metabolites <- c(all_of(topmetabolites_3comparison$Metabolites), all_of(topmetabolites_2groups$Metabolites), all_of(topmetabolites_1comparison$Metabolites), all_of(topmetabolites_2comparison$Metabolites))
+
+# Create PCA object on log2 transformed and scaled (z-score/auto-scale) variables
+data_pca <- metabolite_data_unite %>% 
+  select(top_metabolites) %>% # metabolites with FDR < 0.1 
+  prcomp(scale. = TRUE)
+
+# Tidy data in order to get proper data table format
+data_pca_tidy <- data_pca %>% 
+  tidy("pcs")
+```
+
+```{r echo=FALSE}
+# Augment data in order to get a complete table with original values and PC values. 
+data_pca_aug <- data_pca %>% 
+  augment(metabolite_data_unite)
+
+# Adding percentage to the PCA plot
+x <- data_pca_tidy %>% 
+  filter(PC == 1) %>% 
+  pull(percent)
+x <- str_c("PC1 (", round(x*100, 2), "%)")
+
+y <- data_pca_tidy %>% 
+  filter(PC == 2) %>% 
+  pull(percent)
+y <- str_c("PC2 (", round(y*100, 2), "%)")
+
+data_pca_aug_order <- data_pca_aug %>% 
+    mutate(bwcat_NAFLD = case_when(str_detect(SampleID_bwcat_NAFLD, "NBW_FALSE") ~ "NBW_FALSE",
+                                 str_detect(SampleID_bwcat_NAFLD, "LBW_TRUE") ~ "LBW_TRUE",
+                                 str_detect(SampleID_bwcat_NAFLD, "LBW_FALSE") ~ "LBW_FALSE"))
+
+# Reorder the conditions order
+data_pca_aug_order$bwcat_NAFLD <- factor(data_pca_aug_order$bwcat_NAFLD , levels=c("NBW_FALSE", "LBW_FALSE", "LBW_TRUE"))
+
+groupcolors = c(NBW_FALSE="#32CD32", LBW_FALSE="#6495ED", LBW_TRUE="#FA8072")
+
+# Plot PCA with medical condition as labels
+pca_bwcat_NAFLD <- data_pca_aug_order %>% 
+  ggplot(aes(x = .fittedPC1,
+             y = .fittedPC2,
+             colour = bwcat_NAFLD)) + 
+  geom_point(size = 3, alpha = 0.5) + 
+  scale_color_manual(values=groupcolors) +
+  labs(x = x, y = y, title = "PCA: NBW, LBW÷NAFLD, LBW+NAFLD", color = "bwcat_NAFLD",
+       subtitle = "Top metabolites (FDR ≤ 0.1 and p-value < 0.05)") + theme(legend.position = "bottom") + # (Green, Blue, Red) 
+  stat_ellipse(level = 0.95)  # illustrating the 95% CI interval
+#xlim(-15,10) + ylim(-10,10)
+pca_bwcat_NAFLD
+ggsave(paste(path, "results/04_08_pca_FDR_metabolites.png", sep="/"), plot = pca_bwcat_NAFLD, device = "png", width = 6, height = 4)
+```
+
+In order to get much information we have initially decided to lower our threshold to p-value < 0.5. However, the metabolites Oxalic acid (FDR < 0.1), Tyrosine (FDR < 0.1), Ornithine (FDR < 0.1), Glutamic acid (FDR < 0.1) and Hippuric acid (FDR < 0.1) shows to be significantly different between the groups LBW÷NAFLD and LBW+NAFLD.
+
+
+##PCA with PCAtools package
+```{r}
+clin_data <- clin_data_selected %>%  
+  filter(visit == "A") %>% 
+  mutate(bwcat_NAFLD_binary = case_when(bwcat_NAFLD == 'NBW_FALSE' ~ 0,
+                                        bwcat_NAFLD == 'LBW_FALSE' ~ 1,
+                                        bwcat_NAFLD == 'LBW_TRUE' ~ 2),
+         bwcat_NAFLD_labs = case_when(bwcat_NAFLD == 'NBW_FALSE' ~ "NBW",
+                                      bwcat_NAFLD == 'LBW_FALSE' ~ "LBW w/o NAFLD",
+                                      bwcat_NAFLD == 'LBW_TRUE' ~ "LBW w/ NAFLD"),
+         bwcat_binary = case_when(bwcat == 'NBW' ~ 0,
+                                  bwcat == 'LBW' ~ 1),
+         NAFLD_binary = case_when(NAFLD == FALSE ~ 0,
+                                  NAFLD == TRUE ~ 1))  %>% 
+  
+  as.data.frame()
+
+rownames(clin_data) <- clin_data$id
+
+# Change names so they make sense in the figure
+clin_colnames <- c("visit","id","visitid","bwcat","bw","NAFLD_logical","Height","Weight","BMI","HOMA-IR","Waist/hip ratio","Systolic BP","Diastolic BP","Total cholesterol","LDL cholesterol","HDL cholesterol","F-triglyceride","ASAT","ALAT","GGT","Hepatic fat","VAT mass","Total lean mass","Total fat mass","Total fat %","Trunk fat mass/total fat mass trat","Leg fat mass/total fat mass","Trunk fat mass/Leg fat mass","VO2 max","F-glucose","F-C-peptide","F-insulin","HGP","Hepatic IR Index","Randomization","Adiponectin","Leptin","Ghrelin (active)","FGF-21","GLP-1 (active)","GIP (active)","PYY (total)","Glucagon","Proinsulin","FGF-23","C-peptide","PP","bwcat_NAFLD","Birth weight - NAFLD status","bwcat_NAFLD_labs","Birth weight category","NAFLD status")
+
+colnames(clin_data) <- clin_colnames
+
+# Prepare data format for top metabolites data 
+topmet_df <- metabolite_data_unite %>% 
+  select(all_of(top_metabolites)) %>% 
+  t()
+colnames(topmet_df) <- clin_data$id
+rownames(topmet_df) <- unique(top_metabolites)
+
+
+pca_object <- pca(as.data.frame(topmet_df), metadata = as.data.frame(clin_data), removeVar = 0.1)
+```
+
+
+##Biplot - PCA with PCAtools package
+```{r}
+# Reorder the conditions order
+pca_object$metadata$bwcat_NAFLD <- factor(pca_object$metadata$bwcat_NAFLD_labs , levels=c("NBW", "LBW w/o NAFLD", "LBW /w NAFLD"))
+
+biplot_loadings <- biplot(pca_object, showLoadings = TRUE,
+                          colkey = c('NBW' = '#32CD32', 'LBW w/o NAFLD' = '#6495ED', 'LBW w/ NAFLD' = '#FA8072'), 
+    labSize = 3, pointSize = 3, sizeLoadingsNames = 3, lab = NULL, colby = 'bwcat_NAFLD_labs', 
+    #title = "Bi-plot with loadings - outlier removed",
+    # ellipse config
+      ellipse = TRUE,
+      ellipseType = 't',
+      ellipseLevel = 0.95,
+      ellipseFill = FALSE,
+      ellipseAlpha = 1/4,
+      ellipseLineSize = 1.0,
+    legendPosition = 'top',
+    legendTitleSize = 20,
+    colLegendTitle = "Group:",
+    xlim = c(-5,7), ylim = c(-5, 7)) 
+
+biplot_loadings
+ggsave(paste(path, "results/04_biplot_loadings_outlierremoved.png", sep="/"), plot = biplot_loadings, device = "png", width = 13, height = 10)
+```
+
+
+--------------------------------
+
+--------------------------------
+
+--------------------------------
+
+PCs vs. clinical data
+- Correlation of the PCs back to the clinical data
+- Further exploration of the PCs can come through correlations with clinical data. This is also a mostly untapped resource in the era of ‘big data’ and can help to guide an analysis down a particular path.
+- We now proceed with PCs that account for the "horn" cutoff and then explore further the PCs that have statistically significant correlations.
+
+## Eigencor plot
+Correlation between PC[1-6] and the clinical variables. They have been correted for multiple testing by the BH method.
+```{r echo=FALSE, message=FALSE}
+horn <- parallelPCA(as.data.frame(topmet_df))
+
+eigencorplot(pca_object, components = getComponents(pca_object, 1:horn$n),
+    metavars = c("Birth weight category","NAFLD status","Birth weight - NAFLD status","Height","Weight","BMI","HOMA-IR",
+                 "Waist/hip ratio", "Systolic BP","Diastolic BP","Total cholesterol","LDL cholesterol",
+                 "HDL cholesterol","F-triglyceride","ASAT","ALAT","GGT","Hepatic fat","VAT mass",
+                 "Total lean mass","Total fat mass","Total fat %","Trunk fat mass/total fat mass trat",
+                 "Leg fat mass/total fat mass","Trunk fat mass/Leg fat mass","VO2 max","F-glucose",
+                 "F-C-peptide","F-insulin","HGP","Hepatic IR Index","Adiponectin",
+                 "Leptin","Ghrelin (active)","FGF-21","GLP-1 (active)","GIP (active)",
+                 "PYY (total)","Glucagon","Proinsulin","FGF-23","C-peptide","PP"),
+    cexCorval = 0.7,
+    colCorval = 'black',
+    fontCorval = 1.5,
+    posLab = 'topright',
+    rotLabX = 45,
+    posColKey = 'bottom',
+    cexLabColKey = 1,
+    scale = TRUE,
+    corFUN = "pearson", 
+    colFrame = 'white',
+    plotRsquared = FALSE,
+    corMultipleTestCorrection = "BH",
+    main = 'PC1-2 clinical correlations')
+
+png(paste(path, "results/04_eigencorplot_clinical_PC.png", sep="/"),
+    width = 6*200,        # 5 x 300 pixels
+    height = 6*450,
+    res = 200,            # 300 pixels per inch
+    pointsize = 150)      # font size)   
+eigencorplot(pca_object, components = getComponents(pca_object, 1:2),
+    metavars = c("Birth weight category","NAFLD status","Birth weight - NAFLD status","Height","Weight","BMI","HOMA-IR",
+                 "Waist/hip ratio", "Systolic BP","Diastolic BP","Total cholesterol","LDL cholesterol",
+                 "HDL cholesterol","F-triglyceride","ASAT","ALAT","GGT","Hepatic fat","VAT mass",
+                 "Total lean mass","Total fat mass","Total fat %","Trunk fat mass/total fat mass trat",
+                 "Leg fat mass/total fat mass","Trunk fat mass/Leg fat mass","VO2 max","F-glucose",
+                 "F-C-peptide","F-insulin","HGP","Hepatic IR Index","Adiponectin",
+                 "Leptin","Ghrelin (active)","FGF-21","GLP-1 (active)","GIP (active)",
+                 "PYY (total)","Glucagon","Proinsulin","FGF-23","C-peptide","PP"),
+    cexCorval = 0.7,
+    colCorval = 'black',
+    fontCorval = 1.5,
+    posLab = 'topright',
+    rotLabX = 45,
+    posColKey = 'bottom',
+    cexLabColKey = 1,
+    scale = TRUE,
+    colFrame = 'white',
+    plotRsquared = FALSE,
+    corMultipleTestCorrection = "BH",
+    main = 'PC1-2 clinical correlations')
+dev.off()
+```
+
+
+
+
+
+
+## Loadings for PC1
+Plot the component loadings for PC1
+```{r echo=FALSE}
+PC1_plotloadings <- plotloadings(pca_object,
+  components = getComponents(pca_object, c(1)),
+  rangeRetain = 0.1, absolute = TRUE,
+  col = c('black', 'pink', 'red4'),
+  drawConnectors = TRUE, labSize = 4, title = "Loadings for PC1") + coord_flip()
+#PC1_plotloadings
+#ggsave(paste(path, "results/03_10_PC1_plotloadings.png", sep="/"), plot = PC1_plotloadings, device = "png", width = 15, height = 15)
+
+# -- variables retained:
+# Tyrosine, Ornithine, Arachidonic.acid
+
+```
+
+## Loadings for PC2
+Plot the component loadings for PC2
+```{r echo=FALSE}
+PC2_plotloadings <- plotloadings(pca_object,
+  components = getComponents(pca_object, c(2)),
+  rangeRetain = 0.1, absolute = TRUE,
+  col = c('black', 'pink', 'red4'),
+  drawConnectors = TRUE, labSize = 4, title = "Loadings for PC1") + coord_flip()
+#PC2_plotloadings
+#ggsave(paste(path, "results/03_10_PC1_plotloadings.png", sep="/"), plot = PC1_plotloadings, device = "png", width = 15, height = 15)
+
+# -- variables retained:
+# Cholesterol, alpha.Tocopherol, Hippuric.acid
+
+```
+
+
+
+
+Correlation with top metabolites and clinical variables
+```{r}
+library(DataExplorer)
+combi_data <- combined_data %>%  
+  filter(Label == "A") %>% 
+  select(everything(), -all_of(colnames(metabo_data)), all_of(top_metabolites)) %>%
+  filter(id_bwcat_NAFLD != "066_LBW_FALSE") %>% 
+  as.data.frame()
+rownames(combi_data) <- combi_data$id_bwcat_NAFLD
+
+
+correlationplot_met <- plot_correlation(combi_data, type = "c")
+ggsave(paste(path, "results/04_metabolite_correlationplot.png", sep="/"), plot = correlationplot_met, device = "png", width = 10, height = 10)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+#NOT used: FDR < 0.1 metabolites
+##NOT used: Boxplot of metabolites with FDR < 0.1
+```{r}
+# Save metabolites with FDR <= 0.1
+fdr_metabolites <- as_tibble(c("Hippuric acid", "Oxalic acid", "Tyrosine", "Ornithine", "Glutamic acid"))
+write_csv(fdr_metabolites, paste(path, "data/04_fdr_metabolites.csv", sep="/"))
+
+
+# Pivot data frame 
+pivot_metabo_FDR <- metabolite_data_unite %>% 
+  select(SampleID_bwcat_NAFLD, all_of(fdr_metabolites$value)) %>% 
+  pivot_longer(cols = -SampleID_bwcat_NAFLD, 
+               names_to = "Metabolite", 
+               values_to = "Concentrations") %>% 
+  mutate(bwcat_NAFLD = case_when(str_detect(SampleID_bwcat_NAFLD, "NBW_FALSE") ~ "NBW_FALSE",
+                                 str_detect(SampleID_bwcat_NAFLD, "LBW_TRUE") ~ "LBW_TRUE",
+                                 str_detect(SampleID_bwcat_NAFLD, "LBW_FALSE") ~ "LBW_FALSE"))
+
+# Reorder the conditions order
+pivot_metabo_FDR$bwcat_NAFLD <- factor(pivot_metabo_FDR$bwcat_NAFLD , levels=c("NBW_FALSE", "LBW_FALSE", "LBW_TRUE"))
+
+# Boxplot of significant lipids
+metabolite_boxplot <- pivot_metabo_FDR %>% 
+  ggplot(mapping = aes(x = Concentrations, y = bwcat_NAFLD, fill = bwcat_NAFLD)) + 
+  geom_boxplot(alpha = 0.5) + 
+  geom_point(position = position_jitter(seed = 0.4, width = 0.02), size = 0.8) +
+  coord_flip() + 
+  labs(x = 'Log2 and zscore of metabolite conecntrations', title = "Boxplot: NBW, LBW÷NAFLD, LBW+NAFLD",
+       subtitle = "Metabolites (FDR <= 0.1)") + 
+  facet_wrap(~ Metabolite) + theme(legend.position = "bottom") +
+  scale_fill_manual(values = c("#32CD32", "#6495ED", "#FA8072"))  # (Green, Blue, Red)
+metabolite_boxplot
+ggsave(paste(path, "results/04_09_boxplot_FDR_metabolites.png", sep="/"), plot = metabolite_boxplot, device = "png", width = 9, height = 4)
+
+```
+Significance between the groups: 
+Glutamic acid -> LBW÷NAFLD vs LBW+NAFLD
+Hippuric acid -> LBW÷NAFLD vs NBW÷NAFLD
+Ornithine     -> LBW÷NAFLD vs LBW+NAFLD
+Oxalic acid   -> LBW÷NAFLD vs LBW+NAFLD
+Tyrosine      -> LBW÷NAFLD vs LBW+NAFLD
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+
+##NOT used: Heatmap of metabolites with FDR < 0.1
+Split by groups LBW÷NAFLD, LBW+NAFLD and NBW÷NAFLD
+```{r echo=FALSE}
+filter_met <- metabolite_data_unite %>% 
+  select(SampleID_bwcat_NAFLD, `Hippuric acid`, `Oxalic acid`, Tyrosine, Ornithine, `Glutamic acid`)  
+
+fdr_metabolites <- filter_met %>% 
+  select(`Hippuric acid`, `Oxalic acid`, Tyrosine, Ornithine, `Glutamic acid`) %>% 
+  t()
+
+colnames(fdr_metabolites) <- filter_met$SampleID_bwcat_NAFLD
+fdr_metabolites <- as.matrix(fdr_metabolites)
+
+# Prepare data for group ordered heatmap
+fdr_met <- fdr_metabolites[,order(colnames(fdr_metabolites))]
+fdr_met <- as.matrix(fdr_met)
+
+# Create heatmape
+bwcat_NAFLD <- gsub("_\\d+$", "", colnames(fdr_met))
+
+ha <- HeatmapAnnotation(df = data.frame(bwcat_NAFLD = bwcat_NAFLD))
+
+Heatmap(fdr_metabolites, name = "abundance", top_annotation = ha, 
+    show_column_names = FALSE, cluster_columns = FALSE, 
+    column_split = bwcat_NAFLD, column_gap = unit(4, "mm"), heatmap_width = unit(5, "npc"))
+
+# Save as png file
+png(paste(path, "results/04_09_heatmap_FDR_metabolites.png", sep="/"),
+    width = 6*300,        # 5 x 300 pixels
+    height = 6*300,
+    res = 200,            # 300 pixels per inch
+    pointsize = 10)      # font size) 
+Heatmap(fdr_metabolites, name = "abundance", top_annotation = ha, 
+    show_column_names = FALSE, cluster_columns = FALSE, 
+    column_split = bwcat_NAFLD, column_gap = unit(4, "mm"), heatmap_width = unit(5, "npc"))
+dev.off()
+```
+
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+
+##NOT used: PCA of retained metabolites with FDR = 0.1
+Check how well the metabolites seperates the groups
+```{r message=FALSE, echo=FALSE}
+# Create PCA object on log2 transformed and scaled (z-score/auto-scale) variables
+data_pca <- metabolite_data_unite %>% 
+  select(`Hippuric acid`, `Oxalic acid`, Tyrosine, Ornithine, `Glutamic acid`) %>% # metabolites with FDR < 0.1 
+  prcomp(scale. = TRUE)
+
+# Tidy data in order to get proper data table format
+data_pca_tidy <- data_pca %>% 
+  tidy("pcs")
+```
+
+```{r echo=FALSE}
+# Augment data in order to get a complete table with original values and PC values. 
+data_pca_aug <- data_pca %>% 
+  augment(metabolite_data_unite)
+
+# Adding percentage to the PCA plot
+x <- data_pca_tidy %>% 
+  filter(PC == 1) %>% 
+  pull(percent)
+x <- str_c("PC1 (", round(x*100, 2), "%)")
+
+y <- data_pca_tidy %>% 
+  filter(PC == 2) %>% 
+  pull(percent)
+y <- str_c("PC2 (", round(y*100, 2), "%)")
+
+data_pca_aug_order <- data_pca_aug %>% 
+    mutate(bwcat_NAFLD = case_when(str_detect(SampleID_bwcat_NAFLD, "NBW_FALSE") ~ "NBW_FALSE",
+                                 str_detect(SampleID_bwcat_NAFLD, "LBW_TRUE") ~ "LBW_TRUE",
+                                 str_detect(SampleID_bwcat_NAFLD, "LBW_FALSE") ~ "LBW_FALSE"))
+
+# Reorder the conditions order
+data_pca_aug_order$bwcat_NAFLD <- factor(data_pca_aug_order$bwcat_NAFLD , levels=c("NBW_FALSE", "LBW_FALSE", "LBW_TRUE"))
+
+# Plot PCA with medical condition as labels
+pca_bwcat_NAFLD <- data_pca_aug_order %>% 
+  ggplot(aes(x = .fittedPC1,
+             y = .fittedPC2,
+             colour = bwcat_NAFLD)) + 
+  geom_point(size = 3, alpha = 0.5) + 
+  labs(x = x, y = y, title = "PCA: NBW÷NAFLD, LBW÷NAFLD, LBW+NAFLD", color = "bwcat_NAFLD",
+       subtitle = "Metabolites (FDR = 0.1)") + theme(legend.position = "bottom") +
+  #scale_color_manual(values = c("#32CD32", "#6495ED")) + 
+  stat_ellipse(level = 0.95) # illustrating the 95% CI interval
+pca_bwcat_NAFLD
+ggsave(paste(path, "results/04_08_pca_FDR_metabolites.png", sep="/"), plot = pca_bwcat_NAFLD, device = "png", width = 6, height = 4)
+```
+
+
+
+------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------
+
+# NBW vs LBW 
+#### Baseline comparison between the two groups NBW and LBW with Limma to check the differnce between metabolite abundances
+```{r echo=FALSE}
+# Combine the two data frames
+metabo_data_baseline <- combined_data %>% 
+  filter(Label == "A") %>% 
+  select(-everything(), bwcat, bwcat_NAFLD, all_of(colnames(metabo_data)))
+metabolite_data <- metabo_data_baseline %>% 
+  select(-everything(), all_of(metabol_names)) %>% 
+  t()
+
+colnames(metabolite_data) <- metabo_data_baseline$Sample_ID
+metabolite_data <- as.data.frame(metabolite_data)
+
+# Groups in the lipidomics data
+group <- metabo_data_baseline %>% 
+  mutate(bwcat_binary = case_when(bwcat == "NBW" ~ "0",
+                                  bwcat == "LBW" ~ "1", 
+                                  TRUE ~ bwcat)) %>% 
+  mutate(across(.cols = 4:bwcat_binary, as.double))
+```
+
+
+```{r echo=FALSE, message=FALSE}
+# Baseline NBW vs LBW: Limma
+design <- model.matrix(~ group$bwcat_binary)
+
+# Fit model and compute moderated t-statistics
+fit <- lmFit(metabolite_data, design)
+fit <- eBayes(fit)
+
+# Sorting by raw pvalue between lipid concentration from HIV_NoMets vs. HIV_MetS
+stats_limma <- topTable(fit, sort.by = "P", n = Inf)
+
+# Write toptable to file
+stats_limma_df <- rownames_to_column(stats_limma, "Metabolites")
+stats_limma_database <- inner_join(x = as_tibble(stats_limma_df), 
+                                   y = as_tibble(metabo_database), 
+                                   by = c("Metabolites" = "metabolites"))
+head(stats_limma_database, n = 3)
+#knitr::kable(head(stats_limma_database, n = 3))
+```
+
+
+
+```{r echo=FALSE, message=FALSE}
+# Plot top metabolites with p-value < 0.05 (plotted p-values are NOT FDR-adjusted)
+topmetabolites <- stats_limma_database %>% 
+  filter(P.Value < 0.05) %>% 
+  select(Metabolites) %>% 
+  as.list()
+
+all_significant_metabolites <- list()
+all_significant_metabolites <- (topmetabolites$Metabolites)
+
+# Pivot data frame 
+pivot_metabo_data_baseline <- metabo_data_baseline %>% 
+  pivot_longer(cols = -c(Sample_ID, bwcat, bwcat_NAFLD, Label), 
+               names_to = "Metabolite", 
+               values_to = "Concentrations")
+
+# Reorder the conditions order
+pivot_metabo_data_baseline$bwcat <- factor(pivot_metabo_data_baseline$bwcat , levels=c("NBW", "LBW"))
+
+# Boxplot of significant lipids
+metabolite_plot <- pivot_metabo_data_baseline %>% 
+  filter(Metabolite %in% topmetabolites$Metabolites) %>%
+  ggplot(mapping = aes(x = Concentrations, y = bwcat, fill = bwcat)) + 
+  geom_boxplot(alpha = 0.5) + 
+  geom_point(position = position_jitter(seed = 0.4, width = 0.02), size = 0.8) +
+  coord_flip() + 
+  labs(x = 'Log2 and zscore of metabolite concentrations', title = "Baseline: Difference in metabolite conc. NBW vs LBW",
+       subtitle = "P-value < 0.05 (no FDR correction is done)") + 
+  scale_fill_discrete(name="Randomization of LBW's") +   
+  facet_wrap(~ Metabolite) +
+  scale_fill_manual(values = c("#32CD32", "#6495ED"))  # (Green, Blue)
+metabolite_plot
+ggsave(paste(path, "results/04_01_boxplot_NBW_LBW.png", sep="/"), plot = metabolite_plot, device = "png", width = 10, height = 10)
+```
+
+**Current findings:** When comparing the two study groups NBW and LBW, we observe an indication (the findings are NOT significant when FDR corrected) of difference between the 3 metabolites represented in the above table and boxplot. The LBW group had higher levels of alpha-Tocopherol and Cholesterol (p-value < 0.05), and lower levels of Hippuric acid (p-value < 0.05) compared to the NBW group.
+
+**Minas findings:** The full LBW group had increased serum cholesterol and alpha tocopherol as well as decreased hippuric acid levels compared to NBW controls (Suppl. Table 6 in baseline paper).
+
+**Comparison:** Same findings, however !different values!, due to data pre-processing. It is important to highlight that the differences between the groups are NOT significant, only after the p-values have been FDR adjusted (p-values vs. FDR)
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+
+# NBW vs LBW+NAFLD 
+#### Baseline comparison between the two groups NBW and LBW+NAFLD with Limma to check the differnce between metabolite abundances
+```{r echo=FALSE}
+# Combine the two data frames
+metabo_data_baseline <- combined_data %>% 
+  filter(Label == "A", bwcat_NAFLD != "LBW_FALSE") %>% 
+  select(-everything(), bwcat, bwcat_NAFLD, all_of(colnames(metabo_data)))
+
+metabolite_data <- metabo_data_baseline %>% 
+  select(-everything(), all_of(metabol_names)) %>% 
+  t()
+
+colnames(metabolite_data) <- metabo_data_baseline$Sample_ID
+metabolite_data <- as.data.frame(metabolite_data)
+
+# Groups in the lipidomics data
+group <- metabo_data_baseline %>% 
+  mutate(bwcat_NAFLD_binary = case_when(bwcat_NAFLD == "NBW_FALSE" ~ "0",
+                                        bwcat_NAFLD == "LBW_TRUE" ~ "1", 
+                                  TRUE ~ bwcat_NAFLD)) %>% 
+  mutate(across(.cols = 4:bwcat_NAFLD_binary, as.double))
+```
+
+
+```{r echo=FALSE, message=FALSE}
+# Baseline NBW vs LBW: Limma
+design <- model.matrix(~ group$bwcat_NAFLD_binary)
+
+# Fit model and compute moderated t-statistics
+fit <- lmFit(metabolite_data, design)
+fit <- eBayes(fit)
+
+# Sorting by raw pvalue between lipid concentration from HIV_NoMets vs. HIV_MetS
+stats_limma <- topTable(fit, sort.by = "P", n = Inf)
+
+# Write toptable to file
+stats_limma_df <- rownames_to_column(stats_limma, "Metabolites")
+stats_limma_database <- inner_join(x = as_tibble(stats_limma_df), 
+                                   y = as_tibble(metabo_database), 
+                                   by = c("Metabolites" = "metabolites"))
+head(stats_limma_database, n = 7)
+#knitr::kable(head(stats_limma_database, n = 7))
+```
+
+
+
+```{r echo=FALSE, message=FALSE}
+# Plot top metabolites with p-value < 0.05 (plotted p-values are NOT FDR-adjusted)
+topmetabolites <- stats_limma_database %>% 
+  filter(P.Value < 0.05) %>% 
+  select(Metabolites) %>% 
+  as.list()
+
+all_significant_metabolites <- c(all_significant_metabolites, topmetabolites$Metabolites)
+
+# Pivot data frame 
+pivot_metabo_data_baseline <- metabo_data_baseline %>% 
+  pivot_longer(cols = -c(Sample_ID, bwcat_NAFLD, bwcat, Label), 
+               names_to = "Metabolite", 
+               values_to = "Concentrations")
+
+# Reorder the conditions order
+pivot_metabo_data_baseline$bwcat <- factor(pivot_metabo_data_baseline$bwcat , levels=c("NBW", "LBW"))
+
+# Boxplot of significant lipids
+metabolite_plot <- pivot_metabo_data_baseline %>% 
+  filter(Metabolite %in% topmetabolites$Metabolites) %>%
+  ggplot(mapping = aes(x = Concentrations, y = bwcat_NAFLD, fill = bwcat_NAFLD)) + 
+  geom_boxplot(alpha = 0.5) + 
+  geom_point(position = position_jitter(seed = 0.4, width = 0.02), size = 0.8) +
+  coord_flip() + 
+  labs(x = 'Log2 and zscore of metabolite concentrations', title = "Baseline: Difference in metabolite conc. NBW vs LBW+NAFLD",
+       subtitle = "P-value < 0.05 (no FDR correction is done)") + 
+  scale_fill_discrete(name="Randomization of LBW's") +   
+  facet_wrap(~ Metabolite) +
+  scale_fill_manual(values = c("#32CD32", "#6495ED"))  # (Green, Blue)
+metabolite_plot
+ggsave(paste(path, "results/04_02_boxplot_NBW_LBWNAFLD.png", sep="/"), plot = metabolite_plot, device = "png", width = 10, height = 10)
+```
+
+**Current findings:** When comparing the two study groups NBW and LBW+NAFLD, we observe an indication (the findings are NOT significant when FDR corrected) of difference between the 7 metabolites represented in the above table and boxplot. Compared to the NBW group the LBW+NAFLD group had higher levels of Ornithine, Tyrosine, Alpha-Tocopherol, Tryptophan, Cholesterol and Glutamic acid (p-value < 0.05), and lower levels of Linoleic acid (p-value < 0.05).
+
+**Minas findings:** The LBW+NAFLD individuals had significantly higher levels of glutamic acid, aminomalonic acid, ornithine, tyrosine, tryptophan, cholesterol, and alpha tocopherol (Figure 3, Suppl. Table 7 in baseline paper) compared to NBW controls.
+
+**Comparison:** More or less same findings, however !different values!, due to data pre-processing. It is important to highlight that the differences between the groups are NOT significant, only after the p-values have been FDR adjusted (p-values vs. FDR). The only difference is that Mina finds that the conc. of aminomalonic acid is different between the two groups (I don't fin this in my analysis) and I find that there is a difference in the conc. of Linoleic acid between the two groups (Mina doesn't find this).
+
+
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+
+# NBW vs LBW÷NAFLD 
+#### Baseline comparison between the two groups NBW and LBW÷NAFLD with Limma to check the differnce between metabolite abundances
+```{r echo=FALSE}
+# Combine the two data frames
+metabo_data_baseline <- combined_data %>% 
+  filter(Label == "A", bwcat_NAFLD != "LBW_TRUE") %>% 
+  select(-everything(), bwcat, bwcat_NAFLD, all_of(colnames(metabo_data)))
+
+metabolite_data <- metabo_data_baseline %>% 
+  select(-everything(), all_of(metabol_names)) %>% 
+  t()
+
+colnames(metabolite_data) <- metabo_data_baseline$Sample_ID
+metabolite_data <- as.data.frame(metabolite_data)
+
+# Groups in the lipidomics data
+group <- metabo_data_baseline %>% 
+  mutate(bwcat_NAFLD_binary = case_when(bwcat_NAFLD == "NBW_FALSE" ~ "0",
+                                        bwcat_NAFLD == "LBW_FALSE" ~ "1", 
+                                  TRUE ~ bwcat_NAFLD)) %>% 
+  mutate(across(.cols = 4:bwcat_NAFLD_binary, as.double))
+```
+
+
+```{r echo=FALSE, message=FALSE}
+# Baseline NBW vs LBW: Limma
+design <- model.matrix(~ group$bwcat_NAFLD_binary)
+
+# Fit model and compute moderated t-statistics
+fit <- lmFit(metabolite_data, design)
+fit <- eBayes(fit)
+
+# Sorting by raw pvalue between lipid concentration from HIV_NoMets vs. HIV_MetS
+stats_limma <- topTable(fit, sort.by = "P", n = Inf)
+
+# Write toptable to file
+stats_limma_df <- rownames_to_column(stats_limma, "Metabolites")
+stats_limma_database <- inner_join(x = as_tibble(stats_limma_df), 
+                                   y = as_tibble(metabo_database), 
+                                   by = c("Metabolites" = "metabolites"))
+head(stats_limma_database, n = 3)
+#knitr::kable(head(stats_limma_database, n = 3))
+```
+
+
+
+```{r echo=FALSE, message=FALSE}
+# Plot top metabolites with p-value < 0.05 (plotted p-values are NOT FDR-adjusted)
+topmetabolites <- stats_limma_database %>% 
+  filter(P.Value < 0.05) %>% 
+  select(Metabolites) %>% 
+  as.list()
+
+all_significant_metabolites <- c(all_significant_metabolites, topmetabolites$Metabolites)
+
+# Pivot data frame 
+pivot_metabo_data_baseline <- metabo_data_baseline %>% 
+  pivot_longer(cols = -c(Sample_ID, bwcat_NAFLD, bwcat, Label), 
+               names_to = "Metabolite", 
+               values_to = "Concentrations")
+
+# Reorder the conditions order
+pivot_metabo_data_baseline$bwcat <- factor(pivot_metabo_data_baseline$bwcat , levels=c("NBW", "LBW"))
+
+# Boxplot of significant lipids
+metabolite_plot <- pivot_metabo_data_baseline %>% 
+  filter(Metabolite %in% topmetabolites$Metabolites) %>%
+  ggplot(mapping = aes(x = Concentrations, y = bwcat_NAFLD, fill = bwcat_NAFLD)) + 
+  geom_boxplot(alpha = 0.5) + 
+  geom_point(position = position_jitter(seed = 0.4, width = 0.02), size = 0.8) +
+  coord_flip() + 
+  labs(x = 'Log2 and zscore of metabolite concentrations', title = "Baseline: Difference in metabolite conc. NBW vs LBW÷NAFLD",
+       subtitle = "P-value < 0.05 (no FDR correction is done)") + 
+  scale_fill_discrete(name="Randomization of LBW's") +   
+  facet_wrap(~ Metabolite) +
+  scale_fill_manual(values = c("#32CD32", "#6495ED"))  # (Green, Blue)
+metabolite_plot
+ggsave(paste(path, "results/04_03_boxplot_NBW_LBWnoNAFLD.png", sep="/"), plot = metabolite_plot, device = "png", width = 10, height = 10)
+
+```
+
+**Current findings:** When comparing the two study groups NBW and LBW÷NAFLD, we observe an indication (the findings are NOT significant when FDR corrected) of difference between the 3 metabolites represented in the above table and boxplot. Compared to the NBW group the LBW÷NAFLD group had higher levels of Alpha-Tocopherol (p-value < 0.05), and lower levels of Hippuric acid (FDR < 0.1) and Lactic acid (p-value < 0.05).
+
+**Minas findings:** The LBW÷NAFLD group had significantly lower hippuric acid (p-value < 0.05) level compared to NBW controls (From baseline paper).
+
+**Comparison:** More or less same findings, however !different values!, due to data pre-processing. It is important to highlight that the differences between the groups are NOT significant, only after the p-values have been FDR adjusted (p-values vs. FDR). The only difference is that I also find that there is a difference in the conc. of Alpha-Tocopherol and Lactic acid between the two groups (Mina doesn't find this).
+
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+
+# LBW÷NAFLD vs LBW+NAFLD 
+#### Baseline comparison between the two groups LBW÷NAFLD and LBW+NAFLD with Limma to check the differnce between metabolite abundances
+```{r echo=FALSE}
+# Combine the two data frames
+metabo_data_baseline <- combined_data %>% 
+  filter(Label == "A", bwcat_NAFLD != "NBW_FALSE") %>% 
+  select(-everything(), bwcat, bwcat_NAFLD, all_of(colnames(metabo_data)))
+
+metabolite_data <- metabo_data_baseline %>% 
+  select(-everything(), all_of(metabol_names)) %>% 
+  t()
+
+colnames(metabolite_data) <- metabo_data_baseline$Sample_ID
+metabolite_data <- as.data.frame(metabolite_data)
+
+# Groups in the lipidomics data
+group <- metabo_data_baseline %>% 
+  mutate(bwcat_NAFLD_binary = case_when(bwcat_NAFLD == "LBW_FALSE" ~ "0",
+                                        bwcat_NAFLD == "LBW_TRUE" ~ "1", 
+                                  TRUE ~ bwcat_NAFLD)) %>% 
+  mutate(across(.cols = 4:bwcat_NAFLD_binary, as.double))
+```
+
+
+```{r echo=FALSE, message=FALSE}
+# Baseline NBW vs LBW: Limma
+design <- model.matrix(~ group$bwcat_NAFLD_binary)
+
+# Fit model and compute moderated t-statistics
+fit <- lmFit(metabolite_data, design)
+fit <- eBayes(fit)
+
+# Sorting by raw pvalue between lipid concentration from HIV_NoMets vs. HIV_MetS
+stats_limma <- topTable(fit, sort.by = "P", n = Inf)
+
+# Write toptable to file
+stats_limma_df <- rownames_to_column(stats_limma, "Metabolites")
+stats_limma_database <- inner_join(x = as_tibble(stats_limma_df), 
+                                   y = as_tibble(metabo_database), 
+                                   by = c("Metabolites" = "metabolites"))
+head(stats_limma_database, n = 9)
+#knitr::kable(head(stats_limma_database, n = 9))
+```
+
+
+
+```{r echo=FALSE, message=FALSE}
+# Plot top metabolites with p-value < 0.05 (plotted p-values are NOT FDR-adjusted)
+topmetabolites <- stats_limma_database %>% 
+  filter(P.Value < 0.05) %>% 
+  select(Metabolites) %>% 
+  as.list()
+
+all_significant_metabolites <- c(all_significant_metabolites, topmetabolites$Metabolites)
+
+# Pivot data frame 
+pivot_metabo_data_baseline <- metabo_data_baseline %>% 
+  pivot_longer(cols = -c(Sample_ID, bwcat_NAFLD, bwcat, Label), 
+               names_to = "Metabolite", 
+               values_to = "Concentrations")
+
+# Reorder the conditions order
+pivot_metabo_data_baseline$bwcat <- factor(pivot_metabo_data_baseline$bwcat , levels=c("NBW", "LBW"))
+
+# Boxplot of significant lipids
+metabolite_plot <- pivot_metabo_data_baseline %>% 
+  filter(Metabolite %in% topmetabolites$Metabolites) %>%
+  ggplot(mapping = aes(x = Concentrations, y = bwcat_NAFLD, fill = bwcat_NAFLD)) + 
+  geom_boxplot(alpha = 0.5) + 
+  geom_point(position = position_jitter(seed = 0.4, width = 0.02), size = 0.8) +
+  coord_flip() + 
+  labs(x = 'Log2 and zscore of metabolite concentrations', title = "Baseline: Difference in metabolite conc. LBW÷NAFLD vs LBW+NAFLD",
+       subtitle = "P-value < 0.05 (no FDR correction is done)") + 
+  scale_fill_discrete(name="Randomization of LBW's") +   
+  facet_wrap(~ Metabolite) +
+  scale_fill_manual(values = c("#32CD32", "#6495ED"))  # (Green, Blue)
+metabolite_plot
+
+ggsave(paste(path, "results/04_04_boxplot_LBWnoNAFLD_LBWNAFLD.png", sep="/"), plot = metabolite_plot, device = "png", width = 10, height = 10)
+```
+
+**Current findings:** When comparing the two study groups LBW÷NAFLD and LBW+NAFLD, we observe an indication (the findings are NOT significant when FDR corrected) of difference between the 3 metabolites represented in the above table and boxplot. Compared to the LBW÷NAFLD group the LBW+NAFLD group had higher levels of Oxalic acid (FDR < 0.1), Tyrosine (FDR < 0.1), Ornithine (FDR < 0.1), Glutamic acid (FDR < 0.1), Citrulline (p-value < 0.05), Tryptophan (p-value < 0.05), and lower levels of Linoleic acid (p-value < 0.05), 3,4,5-Trihydroxypentanoic acid (p-value < 0.05), Arachidonic acid (p-value < 0.05).
+
+**Minas findings:** The LBW+NAFLD individuals had significantly higher levels of glutamic acid, ornithine, tyrosine, tryptophan, and oxalic acid compared to LBW÷NAFLD (Figure 3, Suppl. Table 7 in baseline paper).
+
+**Comparison:** More or less same findings, however !different values!, due to data pre-processing. It is important to highlight that the differences between the groups are NOT significant, only after the p-values have been FDR adjusted (p-values vs. FDR). The only difference is that I also find that there is a difference in the conc. of Citrulline, Linoleic acid, 3,4,5-Trihydroxypentanoic acid and Arachidonic acid between the two groups (Mina doesn't find this).
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+
+# Heatmap 
+#### Differential abundant metabolites found between the groups (NBW, LBW÷NAFLD and LBW+NAFLD)
+```{r, echo=FALSE}
+# Combine the two data frames
+metabolite_data_unite <- combined_data %>% 
+  filter(Label == "A") %>% 
+  unite("SampleID_bwcat_NAFLD", c(bwcat_NAFLD, Sample_ID), remove = TRUE) %>% 
+  filter(SampleID_bwcat_NAFLD != "NBW_FALSE_050") %>% 
+  select(SampleID_bwcat_NAFLD, all_of(unique(all_significant_metabolites)))
+
+# Prepare data for heatmap
+metabolite_data_dendro <- metabolite_data_unite %>% 
+  select(`Hippuric acid`, `Oxalic acid`, Tyrosine, Ornithine, `Glutamic acid`) %>% 
+  t()
+
+colnames(metabolite_data_dendro) <- metabolite_data_unite$SampleID_bwcat_NAFLD
+metabolite_data_dendro <- as.matrix(metabolite_data_dendro)
+
+# Prepare data for group ordered heatmap
+metabolite_data_heatmap <- metabolite_data_dendro[,order(colnames(metabolite_data_dendro))]
+metabolite_data_heatmap <- as.matrix(metabolite_data_heatmap)
+```
+
+## Heatmap with dendrogram
+```{r echo=FALSE}
+bwcat_NAFLD <- gsub("_\\d+$", "", colnames(metabolite_data_dendro))
+ha <- HeatmapAnnotation(df = data.frame(bwcat_NAFLD = bwcat_NAFLD))
+
+
+Heatmap(metabolite_data_dendro, name = "concentration", top_annotation = ha, 
+    show_column_names = FALSE, heatmap_legend_param = list(title = "Name")) 
+
+# Save as png file
+png(paste(path, "results/04_05_heatmap_dendrogram.png", sep="/"),
+    width = 6*300,        # 5 x 300 pixels
+    height = 6*300,
+    res = 200,            # 300 pixels per inch
+    pointsize = 10)      # font size)   
+Heatmap(metabolite_data_dendro, name = "concentration", top_annotation = ha, 
+    show_column_names = FALSE) 
+dev.off()
+```
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+
+## Heatmap split by groups 
+### NBW, LBW
+```{r echo=FALSE}
+bwcat <- gsub("_\\S+_\\d+$", "", colnames(metabolite_data_heatmap))
+ha <- HeatmapAnnotation(df = data.frame(bwcat = bwcat))
+
+Heatmap(metabolite_data_heatmap, name = "abundance", top_annotation = ha, 
+    show_column_names = TRUE, cluster_columns = FALSE, 
+    column_split = bwcat, column_gap = unit(2, "mm"), heatmap_width = unit(5, "npc"),
+    column_names_gp = gpar(fontsize = 7))
+
+# Save as png file
+png(paste(path, "results/04_06_heatmap_bwcat.png", sep="/"),
+    width = 6*300,        # 5 x 300 pixels
+    height = 6*300,
+    res = 200,            # 300 pixels per inch
+    pointsize = 10)      # font size) 
+Heatmap(metabolite_data_heatmap, name = "abundance", top_annotation = ha, 
+    show_column_names = TRUE, cluster_columns = FALSE, 
+    column_split = bwcat, column_gap = unit(2, "mm"), heatmap_width = unit(5, "npc"),
+    column_names_gp = gpar(fontsize = 7))
+dev.off()
+```
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+## Heatmap split by groups 
+### LBW÷NAFLD, LBW+NAFLD and NBW
+```{r echo=FALSE}
+bwcat_NAFLD <- gsub("_\\d+$", "", colnames(metabolite_data_heatmap))
+
+ha <- HeatmapAnnotation(df = data.frame(bwcat_NAFLD = bwcat_NAFLD))
+
+Heatmap(metabolite_data_heatmap, name = "abundance", top_annotation = ha, 
+    show_column_names = FALSE, cluster_columns = FALSE, 
+    column_split = bwcat_NAFLD, column_gap = unit(4, "mm"), heatmap_width = unit(5, "npc"))
+
+# Save as png file
+png(paste(path, "results/04_07_heatmap_bwcat_NAFLD.png", sep="/"),
+    width = 6*300,        # 5 x 300 pixels
+    height = 6*300,
+    res = 200,            # 300 pixels per inch
+    pointsize = 10)      # font size) 
+Heatmap(metabolite_data_heatmap, name = "abundance", top_annotation = ha, 
+    show_column_names = FALSE, cluster_columns = FALSE, 
+    column_split = bwcat_NAFLD, column_gap = unit(4, "mm"), heatmap_width = unit(5, "npc"))
+dev.off()
+```
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+
+# PCA of retained metabolites with FDR < 0.1
+Check how well the metabolites seperates the groups
+```{r message=FALSE, echo=FALSE}
+# Create PCA object on log2 transformed and scaled (z-score/auto-scale) variables
+data_pca <- metabolite_data_unite %>% 
+  select(`Hippuric acid`, `Oxalic acid`, Tyrosine, Ornithine, `Glutamic acid`) %>% # metabolites with FDR < 0.1 
+  prcomp(scale. = TRUE)
+
+# Tidy data in order to get proper data table format
+data_pca_tidy <- data_pca %>% 
+  tidy("pcs")
+```
+
+```{r echo=FALSE}
+# Augment data in order to get a complete table with original values and PC values. 
+data_pca_aug <- data_pca %>% 
+  augment(metabolite_data_unite)
+
+# Adding percentage to the PCA plot
+x <- data_pca_tidy %>% 
+  filter(PC == 1) %>% 
+  pull(percent)
+x <- str_c("PC1 (", round(x*100, 2), "%)")
+
+y <- data_pca_tidy %>% 
+  filter(PC == 2) %>% 
+  pull(percent)
+y <- str_c("PC2 (", round(y*100, 2), "%)")
+
+data_pca_aug_order <- data_pca_aug %>% 
+    mutate(bwcat_NAFLD = case_when(str_detect(SampleID_bwcat_NAFLD, "NBW_FALSE") ~ "NBW_FALSE",
+                                 str_detect(SampleID_bwcat_NAFLD, "LBW_TRUE") ~ "LBW_TRUE",
+                                 str_detect(SampleID_bwcat_NAFLD, "LBW_FALSE") ~ "LBW_FALSE"))
+
+# Reorder the conditions order
+data_pca_aug_order$bwcat_NAFLD <- factor(data_pca_aug_order$bwcat_NAFLD , levels=c("NBW_FALSE", "LBW_FALSE", "LBW_TRUE"))
+
+# Plot PCA with medical condition as labels
+pca_bwcat_NAFLD <- data_pca_aug_order %>% 
+  ggplot(aes(x = .fittedPC1,
+             y = .fittedPC2,
+             colour = bwcat_NAFLD)) + 
+  geom_point(size = 3, alpha = 0.5) + 
+  labs(x = x, y = y, title = "PCA: NBW, LBW÷NAFLD, LBW+NAFLD", color = "bwcat_NAFLD",
+       subtitle = "Metabolites (FDR < 0.1)") + theme(legend.position = "bottom") +
+  #scale_color_manual(values = c("#32CD32", "#6495ED")) + 
+  stat_ellipse(level = 0.95) # illustrating the 95% CI interval
+pca_bwcat_NAFLD
+ggsave(paste(path, "results/04_08_pca_FDR_metabolites.png", sep="/"), plot = pca_bwcat_NAFLD, device = "png", width = 6, height = 4)
+```
+
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+
+
+```{r}
+# Pivot data frame 
+pivot_metabo_FDR <- metabolite_data_unite %>% 
+  select(SampleID_bwcat_NAFLD, `Hippuric acid`, `Oxalic acid`, Tyrosine, Ornithine, `Glutamic acid`) %>% 
+  pivot_longer(cols = -SampleID_bwcat_NAFLD, 
+               names_to = "Metabolite", 
+               values_to = "Concentrations") %>% 
+  mutate(bwcat_NAFLD = case_when(str_detect(SampleID_bwcat_NAFLD, "NBW_FALSE") ~ "NBW_FALSE",
+                                 str_detect(SampleID_bwcat_NAFLD, "LBW_TRUE") ~ "LBW_TRUE",
+                                 str_detect(SampleID_bwcat_NAFLD, "LBW_FALSE") ~ "LBW_FALSE"))
+
+
+# Reorder the conditions order
+pivot_metabo_FDR$bwcat_NAFLD <- factor(pivot_metabo_FDR$bwcat_NAFLD , levels=c("NBW_FALSE", "LBW_FALSE", "LBW_TRUE"))
+
+# Boxplot of significant lipids
+metabolite_boxplot <- pivot_metabo_FDR %>% 
+  ggplot(mapping = aes(x = Concentrations, y = bwcat_NAFLD, fill = bwcat_NAFLD)) + 
+  geom_boxplot(alpha = 0.5) + 
+  geom_point(position = position_jitter(seed = 0.4, width = 0.02), size = 0.8) +
+  coord_flip() + 
+  labs(x = 'Log2 and zscore of metabolite conecntrations', title = "Boxplot: NBW, LBW÷NAFLD, LBW+NAFLD",
+       subtitle = "Metabolites (FDR < 0.1)") + 
+  scale_fill_discrete(name="bwcat_NAFLD") +   
+  facet_wrap(~ Metabolite) + theme(legend.position = "bottom") #+
+#  scale_fill_manual(values = c("#32CD32", "#6495ED"))  # (Green, Blue)
+metabolite_boxplot
+ggsave(paste(path, "results/04_09_boxplot_FDR_metabolites.png", sep="/"), plot = metabolite_boxplot, device = "png", width = 9, height = 4)
+
+```
+
+
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+
+
+## Heatmap of retained metabolites with FDR < 0.1
+### Split by groups LBW÷NAFLD, LBW+NAFLD and NBW
+```{r echo=FALSE}
+filter_met <- metabolite_data_unite %>% 
+  select(SampleID_bwcat_NAFLD, `Hippuric acid`, `Oxalic acid`, Tyrosine, Ornithine, `Glutamic acid`)  
+
+fdr_metabolites <- filter_met %>% 
+  select(`Hippuric acid`, `Oxalic acid`, Tyrosine, Ornithine, `Glutamic acid`) %>% 
+  t()
+
+colnames(fdr_metabolites) <- filter_met$SampleID_bwcat_NAFLD
+fdr_metabolites <- as.matrix(fdr_metabolites)
+
+# Prepare data for group ordered heatmap
+fdr_met <- fdr_metabolites[,order(colnames(fdr_metabolites))]
+fdr_met <- as.matrix(fdr_met)
+
+# Create heatmape
+bwcat_NAFLD <- gsub("_\\d+$", "", colnames(fdr_met))
+
+ha <- HeatmapAnnotation(df = data.frame(bwcat_NAFLD = bwcat_NAFLD))
+
+Heatmap(fdr_metabolites, name = "abundance", top_annotation = ha, 
+    show_column_names = FALSE, cluster_columns = FALSE, 
+    column_split = bwcat_NAFLD, column_gap = unit(4, "mm"), heatmap_width = unit(5, "npc"))
+
+# Save as png file
+png(paste(path, "results/04_09_heatmap_FDR_metabolites.png", sep="/"),
+    width = 6*300,        # 5 x 300 pixels
+    height = 6*300,
+    res = 200,            # 300 pixels per inch
+    pointsize = 10)      # font size) 
+Heatmap(fdr_metabolites, name = "abundance", top_annotation = ha, 
+    show_column_names = FALSE, cluster_columns = FALSE, 
+    column_split = bwcat_NAFLD, column_gap = unit(4, "mm"), heatmap_width = unit(5, "npc"))
+dev.off()
+```
+
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+```{r}
+lipid_col_names %>% 
+  as_tibble() %>% 
+  write_csv(paste(path, "data/04_lipid_names.csv", sep="/"))
+
+
+all_significant_lipids %>% 
+  as_tibble() %>% 
+  write_csv(paste(path, "data/04_FDR_lipid_names.csv", sep="/"))
+```
+
+
+
+
+
+```{r}
+# Overrepresentation analysis
+xx <- inner_join(x = as_tibble(all_significant_metabolites), 
+                                   y = as_tibble(metabo_database), 
+                                   by = c("value" = "metabolites"))
+y <- as_tibble(xx$HMDB)
+```
+
+
+

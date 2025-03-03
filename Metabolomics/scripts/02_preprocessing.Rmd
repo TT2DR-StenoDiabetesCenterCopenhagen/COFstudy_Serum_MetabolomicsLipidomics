@@ -1,0 +1,393 @@
+---
+title: "Metabolomics Baseline Analysis"
+subtitle: "Data preprocessing"
+author: "Sofie Olund Villumsen"
+date: "23/8/2021"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+R markdown doc analyzing and exploring metabolomics data in combination with clinical from the type 2 diabetes overfeeding study of 48 men with mean age of 38 years.
+
+# Initial settings
+
+Clear workspace
+```{r echo=FALSE}
+rm(list = ls()) 
+```
+
+Load packages
+```{r message=FALSE}
+library(tidyverse)
+library(caret) # Function nearzerovar
+library(impute) # Imputing data with KNN
+library(DataExplorer) # http://boxuancui.github.io/DataExplorer/
+```
+
+Load data
+```{r message=FALSE}
+path <- "L:/LovbeskyttetMapper/HCOF Stem Cells/Sofie/Baseline_study/Metabolomics"
+setwd(path)
+
+metabo_data <- read_csv(paste(path, "data/01_metabolomics_data.csv", sep="/")) 
+clinical_data <- read_csv(paste(path, "data/01_clinical_data.csv", sep="/"))
+```
+
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+
+# Tidy and combine metabolomics and clinical data
+
+```{r echo=FALSE}
+# Metabolomics data cleanup
+# Filter data to contain samples from the baseline only
+metabolite_data_clean <- metabo_data %>% 
+  select(...3, ...2, everything(), -...1) %>% 
+  slice(8:140) %>% 
+  rename(Sample_ID = ...2, Label = ...3) %>% 
+  mutate(Label = str_to_upper(Label), 
+         Sample_ID = case_when(nchar(Sample_ID) == 1 ~ as.character(paste0("00", Sample_ID)), 
+                               nchar(Sample_ID) == 2 ~ as.character(paste0("0", Sample_ID))))
+```
+
+```{r echo=FALSE}
+# Clinical data cleanup
+clinical_data_clean <- clinical_data %>% 
+  unite("bwcat_NAFLD", c(bwcat,NAFLD), remove = FALSE) %>% 
+  filter(visit != "M") %>% 
+  filter(visitid != "C001")
+```
+
+Combine cleaned data frames
+```{r echo=FALSE}
+combined_data <- left_join(metabolite_data_clean, clinical_data_clean,  by = c("Label" = "visit", "Sample_ID" = "id")) %>% 
+  select(Sample_ID, bwcat, randomization, Label, NAFLD, everything()) #%>% 
+ # write_csv(paste(path, "data/07_combined_data.csv", sep="/")) 
+combined_data
+```
+
+Database information
+```{r echo=FALSE}
+# Database
+metabolite_database <- metabo_data %>% 
+  select(everything(), -c(...1,...2)) %>% 
+  slice(1:4) %>% 
+  rename(database_met = ...3) %>% 
+  t()
+
+colnames(metabolite_database) <- c("HMDB",  "KEGG" ,  "PubChem" , "CheBI") #colnames(metabo_data)[4:ncol(metabo_data)]
+metabolite_database <- as_tibble(metabolite_database) %>% 
+ filter(KEGG != "KEGG") %>% 
+  mutate(metabolites = colnames(metabo_data)[4:ncol(metabo_data)])
+
+as.data.frame(metabolite_database)  %>% 
+  write_csv(paste(path, "data/02_metabolite_database_info.csv", sep="/"))
+```
+
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+
+
+# Explore data
+
+## Variance check (remove cols with zero or near zero values)
+```{r echo=FALSE}
+nearZeroVar(metabolite_data_clean[, 3:ncol(metabolite_data_clean)], saveMetrics = TRUE) %>% 
+  filter(nzv == TRUE)
+```
+**Comments:** No variance data, thus no need for removing any variables.
+
+```{r echo=FALSE}
+# Metabolomics data filter
+metabolite_data <- combined_data %>% 
+  select(all_of(colnames(metabolite_data_clean))) %>% 
+  mutate(across(.cols = 2:ncol(metabolite_data_clean), as.double))
+```
+
+
+## Missing values in combined data
+```{r echo=FALSE}
+profile_missing(metabolite_data_clean) %>% arrange(desc(pct_missing))
+```
+**Comments:** 1 missing value in the data set (alpha-ketoglutaric acid)
+
+## Identify negative values in metaboloics data
+```{r echo=FALSE}
+minvals <- as.data.frame(apply(metabolite_data_clean,2,min))
+minvals
+```
+**Comments:** From the list of min vals, we see that the minimum values for each metabolite differs a lot and some metabolites have negative concentration. Missing values and negative concentrations will be imputed. Afterwards will esch metabolite be normalized and then scaled.
+
+## Outlier overview via boxplot
+```{r echo=FALSE}
+# Pivot data frame 
+pivot_metabo_data <- metabolite_data %>% 
+  pivot_longer(cols = -c(Sample_ID, Label), 
+               names_to = "Metabolite", 
+               values_to = "Concentrations")
+
+# Boxplot of raw metabolite concentrations
+metabolite_plot <- pivot_metabo_data %>% 
+  ggplot(mapping = aes(x = Concentrations, y = Metabolite)) + 
+  geom_boxplot(alpha = 0.5) + 
+  geom_point(position = position_jitter(seed = 0.4, width = 0.02), size = 0.8) +
+  coord_flip() + 
+  labs(x = 'Raw metabolite concentrations', title = "Distribution of metabolite concentrations") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=0.5))
+metabolite_plot
+```
+
+**Comments:** from this plot it is clear that the metabolites follow different ranges and that outliers do occur.The following metabolites will be further explored: 
+
+
+## Outliers to NAN
+```{r}
+met_names <- metabolite_data %>% 
+  select(everything(), -c(Sample_ID, Label))
+
+met_df <- metabolite_data %>% 
+  unite("Label_SampleID", c(Label,Sample_ID), remove = TRUE) 
+
+df_rm_outlier <- data.frame(met_df$Label_SampleID)
+
+# Loop for identifying outliers and replacing them with NA values
+for (met in colnames(met_names)) {
+  # Identify outliers
+  x_new <- filter(met_df, met_df[[met]] %in% boxplot(met_df[[met]], plot = FALSE)$out)
+  
+  # Replace the outlier values with NA
+  metabolite <- replace(met_df[[met]], met_df[[met]] %in% x_new[[met]], values = NA)
+  
+  # Combine in data frame
+  df_rm_outlier <- cbind(df_rm_outlier, data.frame(metabolite))
+}
+
+colnames(df_rm_outlier) <- colnames(met_df)
+```
+
+How many Nan values is there in the data set
+```{r}
+table(is.na(df_rm_outlier))
+sapply(df_rm_outlier, function(x) sum(is.na(x)))
+```
+
+
+## Impute data with k-nearest neighbor
+```{r}
+# Convert data frame from numeric to factor
+indx <- sapply(df_rm_outlier, is.numeric)
+df_rm_outlier[indx] <- lapply(df_rm_outlier[indx], function(df_rm_outlier) as.factor(as.character(df_rm_outlier)))
+df_rm_outlier <- df_rm_outlier[2:66]
+
+# Set random seed 
+if(exists(".Random.seed")) rm(.Random.seed)
+
+# Impute with KNN function
+df_rm_outlier_imputed <- impute.knn(as.matrix(df_rm_outlier))
+
+met_df_imputed <- as_tibble(df_rm_outlier_imputed$data) %>% 
+  mutate(Sample_ID = metabolite_data$Sample_ID,
+         Label = metabolite_data$Label) %>% 
+  select(Sample_ID, Label, everything())
+```
+
+
+
+
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+
+
+# Distribution
+Normality check, prepare data frame for a longer format with the purpose of checking the distribution of data 
+```{r echo=FALSE}
+pivot_conc <- met_df_imputed %>% 
+  pivot_longer(cols = -c(Label, Sample_ID), 
+               names_to = "Metabolite", 
+               values_to = "Concentrations")
+
+# Calculate mean of every metabolite across samples
+mean_concentration <- pivot_conc %>% 
+  group_by(Metabolite) %>% 
+  summarize(Mean = mean(Concentrations))
+
+# Distribution of mean metabolite concentration
+mean_concentration %>% 
+  ggplot(aes(x = Mean)) + 
+  geom_density() + 
+  labs(subtitle = "Distribution of metabolite concentrations",
+       x = "Metabolite concentrations")
+```
+**Comments:** a skewed distribution, thus we need to normalize data.
+
+
+# Distribution
+Normality test, Kolmogorov-Smirnov Test
+```{r echo=FALSE}
+# Kolmogorov-Smirnov Test check if the concentrations are normaly distributed
+pval_ks_test <- ks.test(x = mean_concentration$Mean, 
+        y = "pnorm", 
+        mean = mean(mean_concentration$Mean), 
+        sd = sd(mean_concentration$Mean))$p.value
+pval_ks_test
+# Data is normal distributed if the p-value > 0.05. So the concentration variable is NOT normally distributed.
+```
+
+
+
+# Transform/normalize/scale
+Getting a dataframe with log and scaled concentrations
+```{r echo=FALSE}
+# Logtransform data
+metabolite_data_log <- met_df_imputed
+metabolite_data_log[,3:ncol(metabolite_data_log)] <- log2(metabolite_data_log[,3:ncol(metabolite_data_log)])
+
+# Scale data 
+metabolite_data_log_scale <- metabolite_data_log
+metabolite_data_log_scale[,3:ncol(met_df_imputed)] <- scale(metabolite_data_log[,3:ncol(metabolite_data_log)])
+
+# Save data frame 
+metabolite_data_log_scale <- as_tibble(metabolite_data_log_scale) %>% 
+  mutate(Sample_ID = case_when(nchar(Sample_ID) == 1 ~ as.character(paste0("00", Sample_ID)),
+                               nchar(Sample_ID) == 2 ~ as.character(paste0("0", Sample_ID))))  %>% 
+  write_csv(paste(path, "data/02_metabolomics_imputed_data_log2_zscore.csv", sep="/")) 
+```
+
+
+## Overview via boxplot
+```{r echo=FALSE}
+# Pivot data frame 
+pivot_metabo_data <- metabolite_data_log_scale %>% 
+  pivot_longer(cols = -c(Sample_ID, Label), 
+               names_to = "Metabolite", 
+               values_to = "Concentrations")
+
+# Boxplot of raw metabolite concentrations
+metabolite_plot <- pivot_metabo_data %>% 
+  ggplot(mapping = aes(x = Concentrations, y = Metabolite)) + 
+  geom_boxplot(alpha = 0.5) + 
+  geom_point(position = position_jitter(seed = 0.4, width = 0.02), size = 0.8) +
+  coord_flip() + 
+  labs(x = 'Imputed, log2, and scaled metabolite concentrations', title = "Distribution of metabolite concentrations") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=0.5))
+metabolite_plot
+```
+
+
+# Clinical data: Impute, log transform and scale clinical data
+```{r}
+clin <- clinical_data_clean %>% 
+  mutate(bwcat_binary = case_when(bwcat == "NBW" ~ "0",
+                                  bwcat == "LBW" ~ "1", 
+                                  TRUE ~ bwcat),
+         visit_binary = case_when(visit == "A" ~ "0",
+                                  visit == "B" ~ "1", 
+                                  visit == "C" ~ "2",
+                                  TRUE ~ visit),
+         randomization_binary = case_when(randomization == "Control" ~ "0",
+                                          randomization == "Training" ~ "1", 
+                                          TRUE ~ randomization),
+         NAFLD_binary = case_when(NAFLD == "FALSE" ~ "0",
+                                  NAFLD == "TRUE" ~ "1"),
+         bwcat_NAFLD_binary = case_when(bwcat_NAFLD == "NBW_FALSE" ~ "0",
+                                        bwcat_NAFLD == "LBW_FALSE" ~ "1", 
+                                        bwcat_NAFLD == "LBW_TRUE" ~ "2",
+                                        TRUE ~ bwcat_NAFLD)) %>% 
+  select(id, bwcat_binary, visit_binary, NAFLD_binary, bwcat_NAFLD_binary, randomization_binary, everything(), -c(bwcat, visit, NAFLD, bwcat_NAFLD, randomization, visitid)) 
+```
+
+```{r}
+dim(clin)
+```
+
+```{r}
+table(is.na(clin))
+```
+
+
+## Impute data with k-nearest neighbor
+```{r}
+# Convert data frame from numeric to factor
+indx <- sapply(clin, is.numeric)
+clin[indx] <- lapply(clin[indx], function(clin) as.factor(as.character(clin)))
+clin_ <- clin[1:71]
+
+# Set random seed 
+if(exists(".Random.seed")) rm(.Random.seed)
+library(impute) # Imputing data with KNN
+
+# Impute with KNN function
+clin_data_imputed <- impute.knn(as.matrix(clin_)) 
+  
+clin_data_df_imputed <- as_tibble(clin_data_imputed$data) %>% 
+   mutate(across(.cols = 1:AUC_ins, as.numeric))
+```
+
+
+
+## Transform/normalize/scale
+Getting a dataframe with log and scaled concentrations
+```{r echo=FALSE}
+# Logtransform data
+clin_data_log <- clin_data_df_imputed
+clin_data_log[,7:ncol(clin_data_log)] <- log2(clin_data_log[,7:ncol(clin_data_log)])
+
+# Scale data 
+clin_data_log_scale <- clin_data_log
+clin_data_log_scale[,7:ncol(clin_data_log)] <- scale(clin_data_log[,7:ncol(clin_data_log)]) 
+
+clin_data_log_scale_ <- clin_data_log_scale %>%  
+  mutate(visit = case_when(visit_binary == 0 ~ "A",
+                           visit_binary == 1 ~ "B", 
+                           visit_binary == 2 ~ "C"),
+         bwcat = case_when(bwcat_binary == 0 ~ "NBW",
+                           bwcat_binary == 1 ~ "LBW"), 
+         randomization = case_when(randomization_binary == 0 ~ "Control",
+                                   randomization_binary == 1 ~ "Training"),
+         NAFLD = case_when(NAFLD_binary == 0 ~ "FALSE",
+                           NAFLD_binary == 1 ~ "TRUE" ),
+         bwcat_NAFLD = case_when(bwcat_NAFLD_binary == 0 ~ "NBW_FALSE",
+                                 bwcat_NAFLD_binary == 1 ~ "LBW_FALSE", 
+                                 bwcat_NAFLD_binary == 2 ~ "LBW_TRUE"))
+  
+
+# Save data frame 
+clin_data_log_scale_ <- as_tibble(clin_data_log_scale_) %>% 
+  mutate(id = case_when(nchar(id) == 1 ~ as.character(paste0("00", id)),
+                        nchar(id) == 2 ~ as.character(paste0("0", id))))  %>% 
+  write_csv(paste(path, "data/02_clinical_imputed_data_log2_zscore.csv", sep="/")) 
+```
+
+
+
+
+
+# Combine cleaned and log2/zscore data frames
+```{r echo=FALSE}
+combined_data <- left_join(metabolite_data_log_scale, clin_data_log_scale_,  by = c("Label" = "visit", "Sample_ID" = "id")) %>% 
+  select(Sample_ID, bwcat, visit_binary, NAFLD, randomization, bwcat_NAFLD, bwcat_binary, bwcat_NAFLD_binary, randomization_binary, NAFLD_binary, everything()) %>% 
+  write_csv(paste(path, "data/02_combined_data_imputed_log2_zscore.csv", sep="/")) 
+combined_data
+```
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
